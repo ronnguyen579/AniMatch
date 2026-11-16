@@ -19,6 +19,11 @@ from recommender_engine import (
     update_user_vector_rocchio,
     generate_diverse_deck,
 )
+from storage_manager import (
+    save_profile_to_browser,
+    clear_browser_profile,
+    try_restore_profile_from_browser,
+)
 from card_component import render_tinder_draggable_card
 
 # ==============================================================================
@@ -186,7 +191,9 @@ def init_session_state():
         "swipe_count": 0,
         "last_action_msg": "",
         "dataset_signature": "",
-        "sidebar_params": None
+        "ls_checked": False,
+        "reset_counter": 0,
+        "sidebar_params": None 
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -252,6 +259,7 @@ def process_swipe(
         id_to_idx=id_to_idx,
         is_eyecandy_mode=is_eyecandy
     )
+    save_profile_to_browser(st.session_state.dataset_signature)
 
 
 # ==============================================================================
@@ -265,6 +273,8 @@ def main():
         st.markdown("## 🔥 AniMatch")
     with top_c2:
         if st.button("🧭 Change Persona / Reset", use_container_width=True):
+            st.session_state.reset_counter += 1
+            clear_browser_profile()
             st.session_state.show_onboarding_modal = True
             st.rerun()
 
@@ -346,6 +356,32 @@ def main():
             V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=is_eyecandy
         )
     st.session_state.sidebar_params = current_sidebar_params
+
+    if not st.session_state.ls_checked:
+    ls_status = try_restore_profile_from_browser(
+        dataset_sig=sig,
+        df=df,
+        anime_lookup=anime_lookup,
+        anime_vectors=anime_vectors,
+        expected_dim=expected_dim,
+        update_fn=update_user_vector_rocchio,
+        gamma=gamma,
+        alpha=alpha,
+        beta=beta
+    )
+    if ls_status == "restored":
+        st.session_state.ls_checked = True
+        is_ec = (st.session_state.persona_mode == "Eyecandy First")
+        st.session_state.deck = generate_diverse_deck(
+            df, anime_vectors, st.session_state.v_user,
+            st.session_state.excluded_ids, st.session_state.swiped_titles, 8,
+            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+            V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=is_ec
+        )
+        st.toast("🔄 Restored your previous swipe session from browser storage!")
+    elif ls_status == "empty":
+        st.session_state.ls_checked = True
+    # Nếu ls_status == "pending": giữ nguyên ls_checked=False để chờ lượt rerun ngay sau đó đọc dữ liệu thật
 
     if st.session_state.show_onboarding_modal:
         open_onboarding_modal(
