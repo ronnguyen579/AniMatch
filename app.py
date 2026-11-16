@@ -466,16 +466,26 @@ def main():
 
             st.markdown("---")
             st.markdown("**🃏 Upcoming Diverse Deck (Artstyle MMR + Studio Cap):**")
+            BAD_ART_TAGS = {"male_focus", "female_focus", "cover", "poster", "solo_focus"}
             upcoming_rows = []
             for rank_idx, u_aid in enumerate(st.session_state.deck[:5], start=1):
                 r = anime_lookup[u_aid]
-                art_preview = str(r.get("artstyle_tags", "")).replace("|", ", ")
+                raw_tags = str(r.get("artstyle_tags", "")).strip()
+                # Nếu artstyle_tags trống, lấy từ visual_tags_full (cũng là tag thị giác WD14), không lấy genres
+                if not raw_tags:
+                    raw_tags = str(r.get("visual_tags_full", "")).strip()
+
+                clean_tags = [
+                    t.strip() for t in raw_tags.split("|")
+                    if t.strip() and t.strip() not in BAD_ART_TAGS
+                ][:4]
+
                 upcoming_rows.append({
                     "#": "👉 Active" if rank_idx == 1 else f"#{rank_idx}",
                     "Anime": r["title"],
                     "Score": r["score"],
                     "Studio": get_main_studio(r["studios"]),
-                    "Artstyle (WD14)": art_preview if art_preview else r["genres"]
+                    "Artstyle (WD14)": ", ".join(clean_tags) if clean_tags else "standard_anime_style"
                 })
             st.dataframe(pd.DataFrame(upcoming_rows), use_container_width=True, hide_index=True)
 
