@@ -460,6 +460,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
 
             let isDragging = false;
             let isDrawerOpen = false;
+            let isAnimatingKeyboard = false;
             let startX = 0, startY = 0, currentX = 0, currentY = 0;
             const SWIPE_X_THRESHOLD = 100;
             const SWIPE_UP_THRESHOLD = -80;
@@ -508,7 +509,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             }}
 
             card.addEventListener('pointerdown', (e) => {{
-                if (isDrawerOpen) return;
+                if (isDrawerOpen || isAnimatingKeyboard) return;
                 isDragging = true;
                 startX = e.clientX;
                 startY = e.clientY;
@@ -580,27 +581,21 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
 
             card.addEventListener('pointerup', endDrag);
             card.addEventListener('pointercancel', endDrag);
-            // =================================================================
-            // HỖ TRỢ ĐIỀU KHIỂN BẰNG BÀN PHÍM (⬅️ PASS | ➡️ LIKE | ⬆️ TRAILER | ESC ĐÓNG)
-            // =================================================================
-            let isAnimatingKeyboard = false;
 
-            function handleKeyAction(e) {
-                // Bỏ qua nếu người dùng đang gõ chữ trong ô tìm kiếm hoặc selectbox
+            function handleKeyAction(e) {{
                 const activeTag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
                 if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
                 if (isAnimatingKeyboard || isDragging) return;
 
-                // Nếu ngăn kéo Trailer đang mở: bấm Esc hoặc mũi tên Xuống để đóng
-                if (isDrawerOpen) {
-                    if (e.key === 'Escape' || e.key === 'ArrowDown') {
+                if (isDrawerOpen) {{
+                    if (e.key === 'Escape' || e.key === 'ArrowDown') {{
                         e.preventDefault();
                         closeDrawer();
-                    }
+                    }}
                     return;
-                }
+                }}
 
-                if (e.key === 'ArrowRight') {
+                if (e.key === 'ArrowRight') {{
                     e.preventDefault();
                     isAnimatingKeyboard = true;
                     card.style.transition = 'transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.26s ease';
@@ -609,8 +604,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                     card.style.transform = 'translate(650px, 20px) rotate(28deg)';
                     card.style.opacity = '0';
                     setTimeout(() => triggerStreamlitSwipe('right'), 170);
-
-                } else if (e.key === 'ArrowLeft') {
+                }} else if (e.key === 'ArrowLeft') {{
                     e.preventDefault();
                     isAnimatingKeyboard = true;
                     card.style.transition = 'transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.26s ease';
@@ -619,24 +613,22 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                     card.style.transform = 'translate(-650px, 20px) rotate(-28deg)';
                     card.style.opacity = '0';
                     setTimeout(() => triggerStreamlitSwipe('left'), 170);
-
-                } else if (e.key === 'ArrowUp') {
+                }} else if (e.key === 'ArrowUp') {{
                     e.preventDefault();
                     openDrawer();
-                }
-            }
+                }}
+            }}
 
-            // Gắn listener vào cả iframe hiện tại và cửa sổ cha Streamlit (tránh trùng lặp khi rerun)
             window.addEventListener('keydown', handleKeyAction);
-            try {
-                if (window.parent && window.parent !== window) {
-                    if (window.parent._animatchKeyHandler) {
+            try {{
+                if (window.parent && window.parent !== window) {{
+                    if (window.parent._animatchKeyHandler) {{
                         window.parent.removeEventListener('keydown', window.parent._animatchKeyHandler);
-                    }
+                    }}
                     window.parent._animatchKeyHandler = handleKeyAction;
                     window.parent.addEventListener('keydown', handleKeyAction);
-                }
-            } catch (err) {}
+                }}
+            }} catch (err) {{}}
         </script>
     </body>
     </html>
