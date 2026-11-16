@@ -194,6 +194,8 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["studios"] = df["studios"].fillna("Unknown").astype(str)
     df["image_url"] = df["image_url"].fillna("").astype(str)
     df["trailer_url"] = df["trailer_url"].fillna("").astype(str)
+    df["artstyle_tags"] = df["artstyle_tags"].fillna("").astype(str)
+    df["visual_tags_full"] = df["visual_tags_full"].fillna("").astype(str)
 
     df = df.drop_duplicates(subset=["anime_id"]).reset_index(drop=True)
     return df
