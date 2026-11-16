@@ -41,10 +41,36 @@ div.stButton > button p {
 
 
 # ==============================================================================
+# CACHE NẠP DỮ LIỆU & TỪ ĐIỂN TRA CỨU O(1)
+# ==============================================================================
+@st.cache_data(show_spinner=False)
+def load_and_prepare_catalog(csv_path: str | None):
+    if csv_path:
+        df = normalize_dataframe(pd.read_csv(csv_path))
+    else:
+        df = normalize_dataframe(get_fallback_dataframe())
+
+    all_genres = sorted(list({
+        g.strip()
+        for val in (df["genres"] + "|" + df["themes"]).tolist()
+        for g in re.split(r"[|,;]", str(val))
+        if g.strip()
+    }))
+    anime_lookup = {int(row["anime_id"]): row for _, row in df.iterrows()}
+    return df, all_genres, anime_lookup
+
+
+# ==============================================================================
 # CỬA SỔ KHỞI TẠO HỒ SƠ (ONBOARDING PERSONA MODAL DIALOG)
 # ==============================================================================
 @st.dialog("🧭 Onboarding Persona Setup — AniMatch", width="large")
-def open_onboarding_modal(df, anime_vectors, vectorizers, dims, all_genres, mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight):
+def open_onboarding_modal(
+    df, V_i, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
+    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+):
+    # Đặt cờ False ngay khi mở để tránh kẹt vòng lặp nếu người dùng bấm dấu X tắt modal
+    st.session_state.show_onboarding_modal = False
+
     st.caption("Choose how you want to initialize your preference profile. Once confirmed, this menu closes and takes you directly to the swipe deck.")
 
     persona_choice = st.radio(
@@ -77,10 +103,10 @@ def open_onboarding_modal(df, anime_vectors, vectorizers, dims, all_genres, mmr_
             st.session_state.swipe_count = 0
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, [], 8,
-                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+                V_i=V_i, id_to_idx=id_to_idx
             )
             st.session_state.onboarded = True
-            st.session_state.show_onboarding_modal = False
             st.rerun()
 
     elif persona_choice.startswith("🏷️ Content First"):
@@ -100,10 +126,10 @@ def open_onboarding_modal(df, anime_vectors, vectorizers, dims, all_genres, mmr_
             st.session_state.swipe_count = 0
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, [], 8,
-                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+                V_i=V_i, id_to_idx=id_to_idx
             )
             st.session_state.onboarded = True
-            st.session_state.show_onboarding_modal = False
             st.rerun()
 
     else:
@@ -136,10 +162,10 @@ def open_onboarding_modal(df, anime_vectors, vectorizers, dims, all_genres, mmr_
             st.session_state.swipe_count = 0
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, st.session_state.swiped_titles, 8,
-                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+                V_i=V_i, id_to_idx=id_to_idx
             )
             st.session_state.onboarded = True
-            st.session_state.show_onboarding_modal = False
             st.rerun()
 
 
@@ -159,7 +185,8 @@ def init_session_state():
         "passed_ids": [],
         "swipe_count": 0,
         "last_action_msg": "",
-        "dataset_signature": ""
+        "dataset_signature": "",
+        "sidebar_params": None
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -169,6 +196,9 @@ def init_session_state():
 def process_swipe(
     action: str,
     df: pd.DataFrame,
+    V_i,
+    id_to_idx: dict,
+    anime_lookup: dict,
     anime_vectors: dict,
     gamma: float,
     alpha: float,
@@ -183,7 +213,7 @@ def process_swipe(
         return
 
     current_aid = st.session_state.deck.pop(0)
-    anime_row = df[df["anime_id"] == current_aid].iloc[0]
+    anime_row = anime_lookup[current_aid]
     v_anime = anime_vectors[current_aid]
 
     effective_beta = (beta * 0.4) if len(st.session_state.liked_ids) == 0 else beta
@@ -214,7 +244,9 @@ def process_swipe(
         max_per_studio=max_per_studio,
         franchise_threshold=franchise_thresh,
         min_score=min_score,
-        quality_weight=quality_weight
+        quality_weight=quality_weight,
+        V_i=V_i,
+        id_to_idx=id_to_idx
     )
 
 
@@ -246,7 +278,7 @@ def main():
             selected_local_path = local_csv_files[0]
 
         try:
-            df = normalize_dataframe(pd.read_csv(selected_local_path))
+            df, all_genres, anime_lookup = load_and_prepare_catalog(selected_local_path)
             file_name = os.path.basename(selected_local_path)
             sig = f"local_{file_name}_{len(df)}"
             data_source_label = f"Local CSV ({file_name})"
@@ -254,7 +286,7 @@ def main():
             st.error(f"Error reading `{os.path.basename(selected_local_path)}`: {e}")
             st.stop()
     else:
-        df = normalize_dataframe(get_fallback_dataframe())
+        df, all_genres, anime_lookup = load_and_prepare_catalog(None)
         sig = f"default_{len(df)}"
         data_source_label = "Built-in Sample Dataset"
 
@@ -284,13 +316,8 @@ def main():
         min_score = st.slider("Minimum Rating Score", 5.0, 8.5, 7.2, 0.1)
         quality_weight = st.slider("Quality Boost Weight", 0.0, 0.6, 0.25, 0.05)
 
-    V_i, anime_vectors, vectorizers, dims = build_multimodal_space(df)
-    all_genres = sorted(list({
-        g.strip()
-        for val in (df["genres"] + "|" + df["themes"]).tolist()
-        for g in re.split(r"[|,]", str(val))
-        if g.strip()
-    }))
+    # Giải nén đủ 5 giá trị từ build_multimodal_space
+    V_i, id_to_idx, anime_vectors, vectorizers, dims = build_multimodal_space(df)
 
     expected_dim = V_i.shape[1]
     if st.session_state.v_user is None or st.session_state.v_user.shape[0] != expected_dim:
@@ -300,12 +327,24 @@ def main():
         st.session_state.excluded_ids = excluded_ids
         st.session_state.deck = generate_diverse_deck(
             df, anime_vectors, v_user_0, excluded_ids, [], 8,
-            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+            V_i=V_i, id_to_idx=id_to_idx
         )
+
+    # Tự động cập nhật lại hàng đợi deck ngay khi người dùng chỉnh thanh trượt ở Sidebar
+    current_sidebar_params = (mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight)
+    if st.session_state.sidebar_params is not None and st.session_state.sidebar_params != current_sidebar_params:
+        st.session_state.deck = generate_diverse_deck(
+            df, anime_vectors, st.session_state.v_user,
+            st.session_state.excluded_ids, st.session_state.swiped_titles, 8,
+            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+            V_i=V_i, id_to_idx=id_to_idx
+        )
+    st.session_state.sidebar_params = current_sidebar_params
 
     if st.session_state.show_onboarding_modal:
         open_onboarding_modal(
-            df, anime_vectors, vectorizers, dims, all_genres,
+            df, V_i, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
         )
 
@@ -324,7 +363,7 @@ def main():
         st.warning("🎉 You have swiped through all available anime in the current filter! Click **Change Persona / Reset** or lower the Minimum Rating Score in the sidebar.")
     else:
         current_aid = st.session_state.deck[0]
-        current_anime = df[df["anime_id"] == current_aid].iloc[0]
+        current_anime = anime_lookup[current_aid]
         v_anime = anime_vectors[current_aid]
 
         if np.linalg.norm(st.session_state.v_user) > 1e-9 and np.linalg.norm(v_anime) > 1e-9:
@@ -353,13 +392,13 @@ def main():
 
             if st.button("BRIDGE_SWIPE_PASS", key="btn_bridge_pass"):
                 process_swipe(
-                    "pass", df, anime_vectors, gamma, alpha, beta,
+                    "pass", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
                     mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
                 )
                 st.rerun()
             if st.button("BRIDGE_SWIPE_LIKE", key="btn_bridge_like"):
                 process_swipe(
-                    "like", df, anime_vectors, gamma, alpha, beta,
+                    "like", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
                     mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
                 )
                 st.rerun()
@@ -384,7 +423,7 @@ def main():
             st.markdown("**🃏 Upcoming Diverse Deck (MMR + Studio Cap):**")
             upcoming_rows = []
             for rank_idx, u_aid in enumerate(st.session_state.deck[:5], start=1):
-                r = df[df["anime_id"] == u_aid].iloc[0]
+                r = anime_lookup[u_aid]
                 upcoming_rows.append({
                     "#": "👉 Active" if rank_idx == 1 else f"#{rank_idx}",
                     "Anime": r["title"],
@@ -411,7 +450,8 @@ def main():
             with s1:
                 c1 = st.selectbox("Select Anime A:", options=labels_list, index=0)
             with s2:
-                c2 = st.selectbox("Select Anime B:", options=labels_list, index=min(1, len(labels_list) - 1))
+                options_b = [lbl for lbl in labels_list if lbl != c1]
+                c2 = st.selectbox("Select Anime B:", options=options_b, index=0)
 
             comp = compare_anime(df, anime_label_map[c1], anime_label_map[c2])
             comp_rows = []
