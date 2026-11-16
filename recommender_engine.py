@@ -21,7 +21,7 @@ def build_multimodal_space(df: pd.DataFrame):
     tfidf_studio = TfidfVectorizer()
 
     min_df_value = 4 if len(df) >= 4 else 1
-    tfidf_synopsis = TfidfVectorizer(stop_words="english", min_df=min_df_value)
+    tfidf_synopsis = TfidfVectorizer(stop_words="english", min_df=min_df_value, max_df=0.4)
 
     combined_genres_themes = (
         clean_pipe_text(df["genres"]) + " " + clean_pipe_text(df["themes"])
@@ -38,6 +38,9 @@ def build_multimodal_space(df: pd.DataFrame):
     V_studio = tfidf_studio.fit_transform(cleaned_studio) * W_V
     V_i = hstack([V_genres, V_synopsis, V_studio]).tocsr()
 
+    # Ánh xạ anime_id -> chỉ số dòng trong ma trận thưa V_i để truy xuất O(1)
+    id_to_idx = {int(row["anime_id"]): idx for idx, row in df.iterrows()}
+
     anime_vectors_dict = {
         int(row["anime_id"]): V_i.getrow(idx).toarray()[0]
         for idx, row in df.iterrows()
@@ -53,7 +56,7 @@ def build_multimodal_space(df: pd.DataFrame):
         "synopsis": V_synopsis.shape[1],
         "studio": V_studio.shape[1]
     }
-    return V_i, anime_vectors_dict, vectorizers, dims
+    return V_i, id_to_idx, anime_vectors_dict, vectorizers, dims
 
 
 # Bộ khởi tạo vector sở thích ban đầu cho người dùng mới (Cold-start)
@@ -99,9 +102,9 @@ class LapsedUserPriorSeeder(ContextualPriorSeeder):
         lambda_2: float = 0.6
     ) -> tuple[np.ndarray, set]:
         past_vecs = [self.anime_vectors[aid] for aid in past_anime_ids if aid in self.anime_vectors]
-        sum_v_new = self._encode_genres_to_full_space(new_genres) * max(len(new_genres), 1)
-        sum_v_past = np.sum(past_vecs, axis=0) if past_vecs else np.zeros_like(sum_v_new)
-        v_user_0 = (lambda_1 * sum_v_past) + (lambda_2 * sum_v_new)
+        mean_v_new = self._encode_genres_to_full_space(new_genres)
+        mean_v_past = np.mean(past_vecs, axis=0) if past_vecs else np.zeros_like(mean_v_new)
+        v_user_0 = (lambda_1 * mean_v_past) + (lambda_2 * mean_v_new)
         return v_user_0, set(past_anime_ids)
 
 
@@ -184,7 +187,7 @@ def explanation_to_text(explanations: dict) -> str:
     for feat in ["genres", "synopsis", "studio"]:
         neg_feats.extend([name for name, _ in negative[feat]])
     if neg_feats:
-        reasons.append("it avoids your negative preferences such as " + ", ".join(neg_feats))
+        reasons.append("note: it contains some elements you previously passed on such as " + ", ".join(neg_feats))
 
     if not reasons:
         return "Recommended to explore high-rated visual and studio diversity."
@@ -206,8 +209,8 @@ def compare_anime(df: pd.DataFrame, anime_id_1: int, anime_id_2: int) -> dict:
         val_a, val_b = anime_1[column], anime_2[column]
         comparison[label] = {"anime_a": val_a, "anime_b": val_b}
         if label in ["Genres", "Themes", "Studio"]:
-            set_a = set([x.strip() for x in re.split(r"[|,]", str(val_a)) if x.strip()]) if pd.notna(val_a) else set()
-            set_b = set([x.strip() for x in re.split(r"[|,]", str(val_b)) if x.strip()]) if pd.notna(val_b) else set()
+            set_a = set([x.strip() for x in re.split(r"[|,;]", str(val_a)) if x.strip()]) if pd.notna(val_a) else set()
+            set_b = set([x.strip() for x in re.split(r"[|,;]", str(val_b)) if x.strip()]) if pd.notna(val_b) else set()
             comparison[label]["common"] = sorted(set_a & set_b)
             comparison[label]["different_a"] = sorted(set_a - set_b)
             comparison[label]["different_b"] = sorted(set_b - set_a)
@@ -220,11 +223,9 @@ def update_user_vector_rocchio(v_user: np.ndarray, v_anime: np.ndarray, action: 
     return (gamma * v_user) + delta_v
 
 
-# Tạo bộ thẻ gợi ý kế tiếp bằng Quality Gating + Deduplication + MMR
+# Tạo bộ thẻ gợi ý kế tiếp bằng Quality Gating + Deduplication + MMR (tối ưu ma trận thưa)
 def generate_diverse_deck(
     df: pd.DataFrame,
-    V_i,
-    id_to_idx: dict,
     anime_vectors: dict,
     v_user: np.ndarray,
     excluded_ids: set,
@@ -234,9 +235,10 @@ def generate_diverse_deck(
     max_per_studio: int = 2,
     franchise_threshold: int = 90,
     min_score: float = 7.2,
-    quality_weight: float = 0.25
+    quality_weight: float = 0.25,
+    V_i=None,
+    id_to_idx: dict = None
 ) -> list[int]:
-    # Lọc nhanh bằng mask numpy thay vì copy toàn bộ DataFrame nhiều lần
     mask = ~df["anime_id"].isin(excluded_ids).values
     if not np.any(mask):
         return []
@@ -254,13 +256,17 @@ def generate_diverse_deck(
             cand_df = cand_df[rel_mask]
 
     cand_ids = cand_df["anime_id"].tolist()
-    cand_indices = [id_to_idx[aid] for aid in cand_ids]
-    cand_sparse = V_i[cand_indices]  # Cắt lát trực tiếp trên ma trận thưa (cực nhanh)
+
+    # Dùng lát cắt ma trận thưa V_i nếu có, ngược lại dùng anime_vectors
+    if V_i is not None and id_to_idx is not None:
+        cand_matrix = V_i[[id_to_idx[aid] for aid in cand_ids]]
+    else:
+        cand_matrix = np.vstack([anime_vectors[aid] for aid in cand_ids])
 
     norm_quality = np.clip((cand_df["num_score"].values - 5.0) / 4.5, 0.0, 1.0)
 
     if np.linalg.norm(v_user) > 1e-9:
-        raw_cos = cosine_similarity(cand_sparse, v_user.reshape(1, -1)).flatten()
+        raw_cos = cosine_similarity(cand_matrix, v_user.reshape(1, -1)).flatten()
         norm_cos = (raw_cos + 1.0) / 2.0
         combined_rel = ((1.0 - quality_weight) * norm_cos) + (quality_weight * norm_quality)
     else:
@@ -284,16 +290,17 @@ def generate_diverse_deck(
     if n_gated <= 1:
         return gated_ids
 
-    # Tính trước ma trận tương đồng cặp (n_gated x n_gated) 1 lần duy nhất thay vì tính trong vòng lặp
-    gated_indices = [id_to_idx[aid] for aid in gated_ids]
-    pairwise_sim = cosine_similarity(V_i[gated_indices])
-    user_sims = gated_df["sim_score"].values
+    # Tính trước ma trận tương đồng cặp (n_gated x n_gated) 1 lần duy nhất
+    if V_i is not None and id_to_idx is not None:
+        pairwise_sim = cosine_similarity(V_i[[id_to_idx[aid] for aid in gated_ids]])
+    else:
+        pairwise_sim = cosine_similarity(np.vstack([anime_vectors[aid] for aid in gated_ids]))
 
+    user_sims = gated_df["sim_score"].values
     selected_pos = [0]
     remaining_pos = list(range(1, n_gated))
 
     while remaining_pos and len(selected_pos) < deck_size:
-        # Tính max similarity tới tập đã chọn bằng indexing numpy thuần
         max_sim_to_selected = np.max(pairwise_sim[np.ix_(remaining_pos, selected_pos)], axis=1)
         mmr_scores = (mmr_lambda * user_sims[remaining_pos]) - ((1.0 - mmr_lambda) * max_sim_to_selected)
         best_local_idx = int(np.argmax(mmr_scores))
