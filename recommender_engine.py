@@ -223,6 +223,8 @@ def update_user_vector_rocchio(v_user: np.ndarray, v_anime: np.ndarray, action: 
 # Tạo bộ thẻ gợi ý kế tiếp bằng Quality Gating + Deduplication + MMR
 def generate_diverse_deck(
     df: pd.DataFrame,
+    V_i,
+    id_to_idx: dict,
     anime_vectors: dict,
     v_user: np.ndarray,
     excluded_ids: set,
@@ -234,37 +236,40 @@ def generate_diverse_deck(
     min_score: float = 7.2,
     quality_weight: float = 0.25
 ) -> list[int]:
-    candidates_df = df[~df["anime_id"].isin(excluded_ids)].copy()
-    if candidates_df.empty:
+    # Lọc nhanh bằng mask numpy thay vì copy toàn bộ DataFrame nhiều lần
+    mask = ~df["anime_id"].isin(excluded_ids).values
+    if not np.any(mask):
         return []
 
-    numeric_scores = pd.to_numeric(candidates_df["score"], errors="coerce")
-    candidates_df["num_score"] = numeric_scores.fillna(6.5)
+    cand_df = df.loc[mask, ["anime_id", "title", "studios", "score"]].copy()
+    num_scores = pd.to_numeric(cand_df["score"], errors="coerce").fillna(6.5).values
+    cand_df["num_score"] = num_scores
 
-    high_quality_df = candidates_df[candidates_df["num_score"] >= min_score]
-    if len(high_quality_df) >= deck_size:
-        candidates_df = high_quality_df
-    elif len(high_quality_df) > 0:
-        relaxed_df = candidates_df[candidates_df["num_score"] >= max(min_score - 1.0, 0.0)]
-        if not relaxed_df.empty:
-            candidates_df = relaxed_df
+    hq_mask = num_scores >= min_score
+    if np.sum(hq_mask) >= deck_size:
+        cand_df = cand_df[hq_mask]
+    elif np.sum(hq_mask) > 0:
+        rel_mask = num_scores >= max(min_score - 1.0, 0.0)
+        if np.any(rel_mask):
+            cand_df = cand_df[rel_mask]
 
-    cand_ids = candidates_df["anime_id"].tolist()
-    cand_matrix = np.vstack([anime_vectors[aid] for aid in cand_ids])
+    cand_ids = cand_df["anime_id"].tolist()
+    cand_indices = [id_to_idx[aid] for aid in cand_ids]
+    cand_sparse = V_i[cand_indices]  # Cắt lát trực tiếp trên ma trận thưa (cực nhanh)
 
-    norm_quality = np.clip((candidates_df["num_score"].values - 5.0) / 4.5, 0.0, 1.0)
+    norm_quality = np.clip((cand_df["num_score"].values - 5.0) / 4.5, 0.0, 1.0)
 
     if np.linalg.norm(v_user) > 1e-9:
-        raw_cos = cosine_similarity(cand_matrix, v_user.reshape(1, -1)).flatten()
+        raw_cos = cosine_similarity(cand_sparse, v_user.reshape(1, -1)).flatten()
         norm_cos = (raw_cos + 1.0) / 2.0
         combined_rel = ((1.0 - quality_weight) * norm_cos) + (quality_weight * norm_quality)
     else:
         combined_rel = norm_quality
 
-    candidates_df["sim_score"] = combined_rel
-    candidates_df = candidates_df.sort_values(by="sim_score", ascending=False)
+    cand_df["sim_score"] = combined_rel
+    cand_df = cand_df.sort_values(by="sim_score", ascending=False)
 
-    top_pool = candidates_df.head(min(len(candidates_df), max(deck_size * 5, 35)))
+    top_pool = cand_df.head(min(len(cand_df), max(deck_size * 5, 35)))
     gated_df = deduplicate(
         top_pool,
         max_per_studio=max_per_studio,
@@ -272,32 +277,27 @@ def generate_diverse_deck(
         seen_titles=swiped_titles
     )
     if gated_df.empty:
-        gated_df = candidates_df.head(deck_size)
+        gated_df = cand_df.head(deck_size)
 
     gated_ids = gated_df["anime_id"].tolist()
-    if len(gated_ids) <= 1:
+    n_gated = len(gated_ids)
+    if n_gated <= 1:
         return gated_ids
 
-    gated_vecs = {aid: anime_vectors[aid] for aid in gated_ids}
-    gated_user_sims = {int(row["anime_id"]): float(row["sim_score"]) for _, row in gated_df.iterrows()}
+    # Tính trước ma trận tương đồng cặp (n_gated x n_gated) 1 lần duy nhất thay vì tính trong vòng lặp
+    gated_indices = [id_to_idx[aid] for aid in gated_ids]
+    pairwise_sim = cosine_similarity(V_i[gated_indices])
+    user_sims = gated_df["sim_score"].values
 
-    selected_ids = [gated_ids[0]]
-    remaining_ids = list(gated_ids[1:])
+    selected_pos = [0]
+    remaining_pos = list(range(1, n_gated))
 
-    while remaining_ids and len(selected_ids) < deck_size:
-        best_id, best_mmr = None, -1e9
-        selected_matrix = np.vstack([gated_vecs[sid] for sid in selected_ids])
+    while remaining_pos and len(selected_pos) < deck_size:
+        # Tính max similarity tới tập đã chọn bằng indexing numpy thuần
+        max_sim_to_selected = np.max(pairwise_sim[np.ix_(remaining_pos, selected_pos)], axis=1)
+        mmr_scores = (mmr_lambda * user_sims[remaining_pos]) - ((1.0 - mmr_lambda) * max_sim_to_selected)
+        best_local_idx = int(np.argmax(mmr_scores))
+        chosen_pos = remaining_pos.pop(best_local_idx)
+        selected_pos.append(chosen_pos)
 
-        for cid in remaining_ids:
-            c_vec = gated_vecs[cid].reshape(1, -1)
-            sim_to_user = gated_user_sims[cid]
-            sim_to_selected = np.max(cosine_similarity(c_vec, selected_matrix))
-            mmr_score = (mmr_lambda * sim_to_user) - ((1.0 - mmr_lambda) * sim_to_selected)
-            if mmr_score > best_mmr:
-                best_mmr = mmr_score
-                best_id = cid
-
-        selected_ids.append(best_id)
-        remaining_ids.remove(best_id)
-
-    return selected_ids
+    return [gated_ids[p] for p in selected_pos]
