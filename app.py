@@ -341,16 +341,20 @@ def _get_effective_excluded_ids() -> set:
 def _get_length_excluded_ids(df: pd.DataFrame, length_filter: str) -> set:
     if not length_filter or length_filter == "All Lengths":
         return set()
-    # Trích xuất phần số từ cột episodes (xử lý cả "12", "12.0", "24 eps", "Unknown")
+
     eps_str = df["episodes"].astype(str).str.extract(r"(\d+(?:\.\d+)?)", expand=False)
     eps = pd.to_numeric(eps_str, errors="coerce").fillna(12.0)
 
+    if length_filter.startswith("Movie"):
+        return set(df.loc[eps != 1, "anime_id"].astype(int))
     if length_filter.startswith("Short"):
-        return set(df.loc[eps > 13, "anime_id"].astype(int))
+        return set(df.loc[(eps < 2) | (eps > 13), "anime_id"].astype(int))
     if length_filter.startswith("Medium"):
-        return set(df.loc[eps > 26, "anime_id"].astype(int))
-    if length_filter.startswith("Exclude Long-Running"):
-        return set(df.loc[eps > 50, "anime_id"].astype(int))
+        return set(df.loc[(eps <= 13) | (eps > 26), "anime_id"].astype(int))
+    if length_filter.startswith("Long"):
+        return set(df.loc[(eps <= 26) | (eps > 52), "anime_id"].astype(int))
+    if length_filter.startswith("Endless"):
+        return set(df.loc[eps <= 52, "anime_id"].astype(int))
     return set()
 
 
@@ -368,9 +372,9 @@ def _tick_cooldowns():
 
 
 def _rebuild_user_vector_from_history(
-    anime_lookup: dict, anime_vectors: dict, gamma: float, alpha: float, beta: float
+    anime_lookup: dict, anime_vectors: dict, gamma: float, alpha: float, beta: float,
+    length_filter: str = "All Lengths"
 ):
-    """Tái tạo lại vector v_user chuẩn xác 100% từ v_user_initial và swipe_history hiện tại."""
     v_rebuilt = (
         st.session_state.v_user_initial.copy()
         if st.session_state.get("v_user_initial") is not None
@@ -378,7 +382,10 @@ def _rebuild_user_vector_from_history(
     )
     pos_so_far = 0
     for aid, act in st.session_state.get("swipe_history", []):
-        length_factor = _get_length_penalty_factor(anime_lookup[aid], act) if aid in anime_lookup else 1.0
+        length_factor = (
+            _get_length_penalty_factor(anime_lookup[aid], act, length_filter)
+            if aid in anime_lookup else 1.0
+        )
         base_beta = (beta * 0.4) if pos_so_far == 0 else beta
         eff_beta = base_beta * length_factor
 
@@ -389,9 +396,8 @@ def _rebuild_user_vector_from_history(
             pos_so_far += 1
     st.session_state.v_user = v_rebuilt
 
-def _get_length_penalty_factor(anime_row, action: str) -> float:
-    """Giảm lực trừ điểm nếu user Pass phim quá dài tập (tránh trừ oan gu thể loại)."""
-    if action != "pass":
+def _get_length_penalty_factor(anime_row, action: str, length_filter: str = "All Lengths") -> float:
+    if action != "pass" or length_filter.startswith("Endless"):
         return 1.0
     try:
         ep_count = float(anime_row.get("episodes", 12))
@@ -401,9 +407,9 @@ def _get_length_penalty_factor(anime_row, action: str) -> float:
         ep_count = 12.0
 
     if ep_count > 52:
-        return 0.20   # Phim > 52 tập: chỉ trừ 20% lực đẩy
+        return 0.20
     elif ep_count > 26:
-        return 0.50   # Phim 27-52 tập: trừ 50%
+        return 0.50
     return 1.00
     
 def process_swipe(
@@ -434,7 +440,7 @@ def process_swipe(
     _tick_cooldowns()
 
     # Tính hệ số giảm phạt nếu user Pass phim quá dài tập
-    length_factor = _get_length_penalty_factor(anime_row, action)
+    length_factor = _get_length_penalty_factor(anime_row, action, length_filter)
     has_positive = (len(st.session_state.liked_ids) + len(st.session_state.watched_ids)) > 0
     base_beta = (beta * 0.4) if not has_positive else beta
     effective_beta = base_beta * length_factor
@@ -517,7 +523,7 @@ def revert_swiped_anime(
     st.session_state.swipe_count = len(st.session_state.swipe_history)
 
     # Tái tạo lại vector người dùng chính xác
-    _rebuild_user_vector_from_history(anime_vectors, gamma, alpha, beta)
+    _rebuild_user_vector_from_history(anime_lookup, anime_vectors, gamma, alpha, beta, length_filter)
 
     # Đặt cooldown = 8 lượt quẹt để bộ này chắc chắn KHÔNG xuất hiện trong deck 8 lá hiện tại,
     # nhưng sẽ tự động quay trở lại kho ứng viên và xuất hiện lại vào một lúc nào đó sau này.
@@ -709,12 +715,14 @@ def main():
 
     st.subheader("⏱️ Episode Length Preference")
     length_filter = st.selectbox(
-            "Format / Episode Cap:",
+            "Format / Episode Length:",
             [
                 "All Lengths",
-                "Short (≤ 13 eps — 1 Cour)",
-                "Medium (≤ 26 eps — 1-2 Cours)",
-                "Exclude Long-Running (> 50 eps)"
+                "Movie / One-Shot (1 ep)",
+                "Short (2–13 eps — 1 Cour)",
+                "Medium (14–26 eps — 2 Cours)",
+                "Long (27–52 eps — 3–4 Cours)",
+                "Endless / Marathon (> 52 eps)"
             ],
             index=0
         )
