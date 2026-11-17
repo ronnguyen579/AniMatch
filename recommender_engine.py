@@ -53,7 +53,11 @@ def build_multimodal_space(df: pd.DataFrame):
     V_i = hstack([V_genres, V_synopsis, V_studio]).tocsr()
 
     id_to_idx = {int(row["anime_id"]): idx for idx, row in df.iterrows()}
-    anime_vectors_lookup = SparseVectorLookup(V_i, id_to_idx)
+
+    anime_vectors_dict = {
+        int(row["anime_id"]): V_i.getrow(idx).toarray()[0]
+        for idx, row in df.iterrows()
+    }
 
     vectorizers = {
         "genres": tfidf_genres,
@@ -65,7 +69,7 @@ def build_multimodal_space(df: pd.DataFrame):
         "synopsis": V_synopsis.shape[1],
         "studio": V_studio.shape[1]
     }
-    return V_i, id_to_idx, anime_vectors_lookup, vectorizers, dims
+    return V_i, id_to_idx, anime_vectors_dict, vectorizers, dims
 
 
 # Bộ khởi tạo vector sở thích ban đầu cho người dùng mới (Cold-start)
