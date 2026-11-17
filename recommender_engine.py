@@ -8,19 +8,31 @@ from scipy.sparse import hstack, csr_matrix
 
 from data_loader import clean_pipe_text, get_main_studio, same_franchise
 
-# Trọng số cho 4 không gian con (Genres, Synopsis, Studio, Artstyle)
+# Trọng số cho 3 không gian con
 W_G = 2.5
 W_S = 0.8
 W_V = 0.35
-W_A = 1.2
 
 
-# Xây dựng ma trận vector TF-IDF cho 4 không gian con (Genres, Synopsis, Studio, Artstyle)
+class SparseVectorLookup:
+    """Tra cứu vector mật độ dày theo yêu cầu O(1) từ ma trận thưa V_i, tiết kiệm RAM và thời gian khởi động."""
+    def __init__(self, V_i: csr_matrix, id_to_idx: dict):
+        self.V_i = V_i
+        self.id_to_idx = id_to_idx
+
+    def __contains__(self, anime_id: int) -> bool:
+        return int(anime_id) in self.id_to_idx
+
+    def __getitem__(self, anime_id: int) -> np.ndarray:
+        idx = self.id_to_idx[int(anime_id)]
+        return self.V_i.getrow(idx).toarray()[0]
+
+
+# Xây dựng ma trận vector TF-IDF cho 3 không gian con (Genres, Synopsis, Studio)
 @st.cache_resource(show_spinner=False)
 def build_multimodal_space(df: pd.DataFrame):
     tfidf_genres = TfidfVectorizer(stop_words="english")
     tfidf_studio = TfidfVectorizer()
-    tfidf_artstyle = TfidfVectorizer()
 
     min_df_value = 4 if len(df) >= 4 else 1
     tfidf_synopsis = TfidfVectorizer(stop_words="english", min_df=min_df_value, max_df=0.4)
@@ -30,15 +42,6 @@ def build_multimodal_space(df: pd.DataFrame):
     ).str.strip()
     cleaned_studio = clean_pipe_text(df["studio"])
 
-    # Kết hợp artstyle_tags (thẩm mỹ lõi) và visual_tags_full (chi tiết thị giác WD14)
-    art_col = df["artstyle_tags"] if "artstyle_tags" in df.columns else pd.Series([""] * len(df))
-    vis_col = df["visual_tags_full"] if "visual_tags_full" in df.columns else pd.Series([""] * len(df))
-    combined_art_tokens = (clean_pipe_text(art_col) + " " + clean_pipe_text(vis_col)).str.strip()
-
-    # Fallback sang Studio + Year nếu dataset chưa chạy WD14 Tagger
-    if combined_art_tokens.str.len().sum() == 0:
-        combined_art_tokens = (cleaned_studio + " " + df["year"].astype(str)).str.strip()
-
     V_genres = tfidf_genres.fit_transform(combined_genres_themes) * W_G
     try:
         V_synopsis = tfidf_synopsis.fit_transform(df["synopsis"]) * W_S
@@ -47,55 +50,41 @@ def build_multimodal_space(df: pd.DataFrame):
         V_synopsis = tfidf_synopsis.fit_transform(df["synopsis"]) * W_S
 
     V_studio = tfidf_studio.fit_transform(cleaned_studio) * W_V
-    try:
-        V_artstyle = tfidf_artstyle.fit_transform(combined_art_tokens) * W_A
-    except ValueError:
-        tfidf_artstyle = TfidfVectorizer()
-        V_artstyle = tfidf_artstyle.fit_transform(df["title"].astype(str)) * 0.0
-
-    V_i = hstack([V_genres, V_synopsis, V_studio, V_artstyle]).tocsr()
+    V_i = hstack([V_genres, V_synopsis, V_studio]).tocsr()
 
     id_to_idx = {int(row["anime_id"]): idx for idx, row in df.iterrows()}
-
-    anime_vectors_dict = {
-        int(row["anime_id"]): V_i.getrow(idx).toarray()[0]
-        for idx, row in df.iterrows()
-    }
+    anime_vectors_lookup = SparseVectorLookup(V_i, id_to_idx)
 
     vectorizers = {
         "genres": tfidf_genres,
         "synopsis": tfidf_synopsis,
-        "studio": tfidf_studio,
-        "artstyle": tfidf_artstyle
+        "studio": tfidf_studio
     }
     dims = {
         "genres": V_genres.shape[1],
         "synopsis": V_synopsis.shape[1],
-        "studio": V_studio.shape[1],
-        "artstyle": V_artstyle.shape[1]
+        "studio": V_studio.shape[1]
     }
-    return V_i, V_artstyle, id_to_idx, anime_vectors_dict, vectorizers, dims
+    return V_i, id_to_idx, anime_vectors_lookup, vectorizers, dims
 
 
 # Bộ khởi tạo vector sở thích ban đầu cho người dùng mới (Cold-start)
 class ContextualPriorSeeder:
-    def __init__(self, anime_vectors: dict, genre_vectorizer, w_g=2.5, dim_sypnosis=0, dim_studio=0, dim_artstyle=0):
+    def __init__(self, anime_vectors, genre_vectorizer, w_g=2.5, dim_sypnosis=0, dim_studio=0):
         self.anime_vectors = anime_vectors
         self.genre_vectorizer = genre_vectorizer
         self.w_g = w_g
         self.dim_sypnosis = dim_sypnosis
         self.dim_studio = dim_studio
-        self.dim_artstyle = dim_artstyle
 
     def _encode_genres_to_full_space(self, selected_genres: list[str]) -> np.ndarray:
-        tail_zeros = self.dim_sypnosis + self.dim_studio + self.dim_artstyle
         if not selected_genres:
-            total_dim = len(self.genre_vectorizer.get_feature_names_out()) + tail_zeros
+            total_dim = len(self.genre_vectorizer.get_feature_names_out()) + self.dim_sypnosis + self.dim_studio
             return np.zeros(total_dim)
         cleaned_genres = [g.replace("|", " ").replace(",", " ") for g in selected_genres]
         genre_vecs = self.genre_vectorizer.transform(cleaned_genres).toarray()
         v_g_mean = np.mean(genre_vecs, axis=0) * self.w_g
-        return np.concatenate([v_g_mean, np.zeros(tail_zeros)])
+        return np.concatenate([v_g_mean, np.zeros(self.dim_sypnosis), np.zeros(self.dim_studio)])
 
     def seed_cold_start(self, mode: str, selected_items: list) -> tuple[np.ndarray, set]:
         if mode == "content_first":
@@ -105,10 +94,7 @@ class ContextualPriorSeeder:
             if picked_vecs:
                 v_user_0 = np.mean(picked_vecs, axis=0)
             else:
-                total_dim = (
-                    len(self.genre_vectorizer.get_feature_names_out())
-                    + self.dim_sypnosis + self.dim_studio + self.dim_artstyle
-                )
+                total_dim = len(self.genre_vectorizer.get_feature_names_out()) + self.dim_sypnosis + self.dim_studio
                 v_user_0 = np.zeros(total_dim)
             return v_user_0, set(selected_items)
         else:
@@ -155,30 +141,23 @@ def deduplicate(recommendations: pd.DataFrame, max_per_studio: int = 2, threshol
     return pd.DataFrame(selected)
 
 
-# Cắt vector tổng hợp thành 4 vector con riêng biệt (Genres, Synopsis, Studio, Artstyle)
+# Cắt vector tổng hợp thành 3 vector con riêng biệt (Genres, Synopsis, Studio)
 def split_full_vector_to_subspaces(full_vec: np.ndarray, dims: dict) -> dict:
     g_end = dims["genres"]
     s_end = g_end + dims["synopsis"]
-    v_end = s_end + dims["studio"]
     return {
         "genres": csr_matrix(full_vec[:g_end]),
         "synopsis": csr_matrix(full_vec[g_end:s_end]),
-        "studio": csr_matrix(full_vec[s_end:v_end]),
-        "artstyle": csr_matrix(full_vec[v_end:])
+        "studio": csr_matrix(full_vec[s_end:])
     }
 
 
-# Tìm top từ khóa đóng góp điểm tương đồng dương và âm lớn nhất trên 4 không gian con
+# Tìm top từ khóa đóng góp điểm tương đồng dương và âm lớn nhất
 def explain_recommendation(user_vectors: dict, anime_vectors: dict, vectorizers: dict, top_n: int = 3) -> dict:
-    weights = {"genres": W_G, "synopsis": W_S, "studio": W_V, "artstyle": W_A}
+    weights = {"genres": 2.5, "synopsis": 0.8, "studio": 0.35}
     explanations = {"positive": {}, "negative": {}}
 
     for feature, weight in weights.items():
-        if feature not in user_vectors or user_vectors[feature].shape[1] == 0:
-            explanations["positive"][feature] = []
-            explanations["negative"][feature] = []
-            continue
-
         contributions = (user_vectors[feature].multiply(anime_vectors[feature])).toarray()[0] * weight
         terms = vectorizers[feature].get_feature_names_out()
 
@@ -201,30 +180,26 @@ def explanation_to_text(explanations: dict) -> str:
     negative = explanations["negative"]
     reasons = []
 
-    genres = [name for name, _ in positive.get("genres", [])]
+    genres = [name for name, _ in positive["genres"]]
     if genres:
         reasons.append("it matches your interest in " + ", ".join(genres))
 
-    artstyles = [name for name, _ in positive.get("artstyle", [])]
-    if artstyles:
-        reasons.append("its visual artstyle aligns with " + ", ".join(artstyles))
-
-    synopsis = [name for name, _ in positive.get("synopsis", [])]
+    synopsis = [name for name, _ in positive["synopsis"]]
     if synopsis:
         reasons.append("its storyline includes elements related to " + ", ".join(synopsis))
 
-    studios = [name for name, _ in positive.get("studio", [])]
+    studios = [name for name, _ in positive["studio"]]
     if studios:
         reasons.append("it features studios you tend to prefer, such as " + ", ".join(studios))
 
     neg_feats = []
-    for feat in ["genres", "artstyle", "synopsis", "studio"]:
-        neg_feats.extend([name for name, _ in negative.get(feat, [])])
+    for feat in ["genres", "synopsis", "studio"]:
+        neg_feats.extend([name for name, _ in negative[feat]])
     if neg_feats:
-        reasons.append("note: it contains some elements you previously passed on such as " + ", ".join(neg_feats[:3]))
+        reasons.append("note: it contains some elements you previously passed on such as " + ", ".join(neg_feats))
 
     if not reasons:
-        return "Recommended to explore distinct Danbooru visual artstyles and studio diversity."
+        return "Recommended to explore high-rated visual and studio diversity."
     return "Recommended because " + ", and ".join(reasons) + "."
 
 
@@ -235,16 +210,14 @@ def compare_anime(df: pd.DataFrame, anime_id_1: int, anime_id_2: int) -> dict:
 
     attributes = {
         "Title": "title", "Type": "type", "Genres": "genres", "Themes": "themes",
-        "Artstyle": "artstyle_tags", "Synopsis": "synopsis", "Studio": "studios",
-        "Score": "score", "Episodes": "episodes", "Year": "year", "Image": "image_url"
+        "Synopsis": "synopsis", "Studio": "studios", "Score": "score",
+        "Episodes": "episodes", "Year": "year", "Image": "image_url"
     }
     comparison = {}
     for label, column in attributes.items():
-        if column not in df.columns:
-            continue
         val_a, val_b = anime_1[column], anime_2[column]
         comparison[label] = {"anime_a": val_a, "anime_b": val_b}
-        if label in ["Genres", "Themes", "Studio", "Artstyle"]:
+        if label in ["Genres", "Themes", "Studio"]:
             set_a = set([x.strip() for x in re.split(r"[|,;]", str(val_a)) if x.strip()]) if pd.notna(val_a) else set()
             set_b = set([x.strip() for x in re.split(r"[|,;]", str(val_b)) if x.strip()]) if pd.notna(val_b) else set()
             comparison[label]["common"] = sorted(set_a & set_b)
@@ -259,10 +232,10 @@ def update_user_vector_rocchio(v_user: np.ndarray, v_anime: np.ndarray, action: 
     return (gamma * v_user) + delta_v
 
 
-# Tạo bộ thẻ gợi ý kế tiếp bằng Quality Gating + Deduplication + MMR (hỗ trợ phân định 8 Artstyle cho Eyecandy)
+# Tạo bộ thẻ gợi ý kế tiếp bằng Quality Gating + Deduplication + MMR (tối ưu ma trận thưa)
 def generate_diverse_deck(
     df: pd.DataFrame,
-    anime_vectors: dict,
+    anime_vectors,
     v_user: np.ndarray,
     excluded_ids: set,
     swiped_titles: list[str],
@@ -273,9 +246,7 @@ def generate_diverse_deck(
     min_score: float = 7.2,
     quality_weight: float = 0.25,
     V_i=None,
-    V_artstyle=None,
-    id_to_idx: dict = None,
-    is_eyecandy_mode: bool = False
+    id_to_idx: dict = None
 ) -> list[int]:
     mask = ~df["anime_id"].isin(excluded_ids).values
     if not np.any(mask):
@@ -301,9 +272,8 @@ def generate_diverse_deck(
         cand_matrix = np.vstack([anime_vectors[aid] for aid in cand_ids])
 
     norm_quality = np.clip((cand_df["num_score"].values - 5.0) / 4.5, 0.0, 1.0)
-    is_cold_zero = np.linalg.norm(v_user) <= 1e-9
 
-    if not is_cold_zero:
+    if np.linalg.norm(v_user) > 1e-9:
         raw_cos = cosine_similarity(cand_matrix, v_user.reshape(1, -1)).flatten()
         norm_cos = (raw_cos + 1.0) / 2.0
         combined_rel = ((1.0 - quality_weight) * norm_cos) + (quality_weight * norm_quality)
@@ -313,24 +283,13 @@ def generate_diverse_deck(
     cand_df["sim_score"] = combined_rel
     cand_df = cand_df.sort_values(by="sim_score", ascending=False)
 
-    # Nếu đang ở Eyecandy First lúc cold-start, mở rộng pool ứng viên và ép max_per_studio=1 để bốc 8 artstyle tách biệt
-    effective_studio_cap = 1 if (is_eyecandy_mode and is_cold_zero) else max_per_studio
-    pool_limit = max(deck_size * 8, 60) if (is_eyecandy_mode and is_cold_zero) else max(deck_size * 5, 35)
-
-    top_pool = cand_df.head(min(len(cand_df), pool_limit))
+    top_pool = cand_df.head(min(len(cand_df), max(deck_size * 5, 35)))
     gated_df = deduplicate(
         top_pool,
-        max_per_studio=effective_studio_cap,
+        max_per_studio=max_per_studio,
         threshold=franchise_threshold,
         seen_titles=swiped_titles
     )
-    if len(gated_df) < deck_size:
-        gated_df = deduplicate(
-            top_pool,
-            max_per_studio=max_per_studio,
-            threshold=franchise_threshold,
-            seen_titles=swiped_titles
-        )
     if gated_df.empty:
         gated_df = cand_df.head(deck_size)
 
@@ -339,18 +298,10 @@ def generate_diverse_deck(
     if n_gated <= 1:
         return gated_ids
 
-    # Chọn không gian tính đa dạng cho MMR:
-    # Nếu là Eyecandy First (đặc biệt khi mới vào), ép MMR tối đa hóa khoảng cách trên V_artstyle (Danbooru tags)
-    if is_eyecandy_mode and V_artstyle is not None and id_to_idx is not None:
-        gated_indices = [id_to_idx[aid] for aid in gated_ids]
-        pairwise_sim = cosine_similarity(V_artstyle[gated_indices])
-        effective_mmr_lambda = min(mmr_lambda, 0.45) if is_cold_zero else mmr_lambda
-    elif V_i is not None and id_to_idx is not None:
+    if V_i is not None and id_to_idx is not None:
         pairwise_sim = cosine_similarity(V_i[[id_to_idx[aid] for aid in gated_ids]])
-        effective_mmr_lambda = mmr_lambda
     else:
         pairwise_sim = cosine_similarity(np.vstack([anime_vectors[aid] for aid in gated_ids]))
-        effective_mmr_lambda = mmr_lambda
 
     user_sims = gated_df["sim_score"].values
     selected_pos = [0]
@@ -358,7 +309,7 @@ def generate_diverse_deck(
 
     while remaining_pos and len(selected_pos) < deck_size:
         max_sim_to_selected = np.max(pairwise_sim[np.ix_(remaining_pos, selected_pos)], axis=1)
-        mmr_scores = (effective_mmr_lambda * user_sims[remaining_pos]) - ((1.0 - effective_mmr_lambda) * max_sim_to_selected)
+        mmr_scores = (mmr_lambda * user_sims[remaining_pos]) - ((1.0 - mmr_lambda) * max_sim_to_selected)
         best_local_idx = int(np.argmax(mmr_scores))
         chosen_pos = remaining_pos.pop(best_local_idx)
         selected_pos.append(chosen_pos)

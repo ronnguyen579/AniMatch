@@ -10,7 +10,6 @@ from data_loader import get_fallback_dataframe, normalize_dataframe, get_main_st
 from recommender_engine import (
     W_G,
     build_multimodal_space,
-    ContextualPriorSeeder,
     LapsedUserPriorSeeder,
     split_full_vector_to_subspaces,
     explain_recommendation,
@@ -19,12 +18,12 @@ from recommender_engine import (
     update_user_vector_rocchio,
     generate_diverse_deck,
 )
+from card_component import render_tinder_draggable_card
 from storage_manager import (
     save_profile_to_browser,
     clear_browser_profile,
     try_restore_profile_from_browser,
 )
-from card_component import render_tinder_draggable_card
 
 # ==============================================================================
 # CẤU HÌNH TRANG WEB (PAGE CONFIGURATION)
@@ -70,7 +69,7 @@ def load_and_prepare_catalog(csv_path: str | None):
 # ==============================================================================
 @st.dialog("🧭 Onboarding Persona Setup — AniMatch", width="large")
 def open_onboarding_modal(
-    df, V_i, V_artstyle, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
+    df, V_i, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
     mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
 ):
     st.session_state.show_onboarding_modal = False
@@ -80,7 +79,7 @@ def open_onboarding_modal(
     persona_choice = st.radio(
         "Select Your User Persona:",
         [
-            "👀 Eyecandy First (Zero-shot visual discovery — 8 distinct Danbooru artstyles)",
+            "👀 Eyecandy First (Zero-shot visual discovery — jump straight into swiping)",
             "🏷️ Content First (Cold-start — pick your favorite genres & themes)",
             "🕰️ Lapsed User (Returning user — blend past watch history with new genres)"
         ]
@@ -91,15 +90,15 @@ def open_onboarding_modal(
         genre_vectorizer=vectorizers["genres"],
         w_g=W_G,
         dim_sypnosis=dims["synopsis"],
-        dim_studio=dims["studio"],
-        dim_artstyle=dims["artstyle"]
+        dim_studio=dims["studio"]
     )
 
     if persona_choice.startswith("👀 Eyecandy First"):
-        st.info("No upfront survey needed! We deal 8 cards with maximally distinct Danbooru visual artstyles so your taste evolves from what catches your eye.")
+        st.info("No upfront survey needed! We will deal a diverse deck of high-rated anime so your persona evolves naturally with every swipe.")
         if st.button("🔥 Start Swiping Now", type="primary", use_container_width=True):
             v_user_0, excluded_ids = seeder.seed_cold_start("eyecandy_first", [])
             st.session_state.persona_mode = "Eyecandy First"
+            st.session_state.seed_params = {}
             st.session_state.v_user = v_user_0
             st.session_state.excluded_ids = excluded_ids
             st.session_state.swiped_titles = []
@@ -109,9 +108,10 @@ def open_onboarding_modal(
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, [], 8,
                 mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-                V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=True
+                V_i=V_i, id_to_idx=id_to_idx
             )
             st.session_state.onboarded = True
+            st.session_state.pending_ls_save = True
             st.rerun()
 
     elif persona_choice.startswith("🏷️ Content First"):
@@ -123,6 +123,7 @@ def open_onboarding_modal(
         if st.button("🚀 Initialize & Start Swiping", type="primary", use_container_width=True):
             v_user_0, excluded_ids = seeder.seed_cold_start("content_first", selected_genres)
             st.session_state.persona_mode = "Content First"
+            st.session_state.seed_params = {"selected_genres": selected_genres}
             st.session_state.v_user = v_user_0
             st.session_state.excluded_ids = excluded_ids
             st.session_state.swiped_titles = []
@@ -132,9 +133,10 @@ def open_onboarding_modal(
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, [], 8,
                 mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-                V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=False
+                V_i=V_i, id_to_idx=id_to_idx
             )
             st.session_state.onboarded = True
+            st.session_state.pending_ls_save = True
             st.rerun()
 
     else:
@@ -159,6 +161,12 @@ def open_onboarding_modal(
             past_ids = [anime_options[lbl] for lbl in picked_past]
             v_user_0, excluded_ids = seeder.seed_lapsed_user(past_ids, picked_new, lambda_1, lambda_2)
             st.session_state.persona_mode = "Lapsed User"
+            st.session_state.seed_params = {
+                "past_ids": past_ids,
+                "new_genres": picked_new,
+                "lambda_1": lambda_1,
+                "lambda_2": lambda_2,
+            }
             st.session_state.v_user = v_user_0
             st.session_state.excluded_ids = excluded_ids
             st.session_state.swiped_titles = [str(df[df["anime_id"] == aid].iloc[0]["title"]) for aid in past_ids]
@@ -168,9 +176,10 @@ def open_onboarding_modal(
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, st.session_state.swiped_titles, 8,
                 mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-                V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=False
+                V_i=V_i, id_to_idx=id_to_idx
             )
             st.session_state.onboarded = True
+            st.session_state.pending_ls_save = True
             st.rerun()
 
 
@@ -180,8 +189,14 @@ def open_onboarding_modal(
 def init_session_state():
     defaults = {
         "onboarded": False,
-        "show_onboarding_modal": True,
+        "show_onboarding_modal": False,
+        "ls_checked": False,
+        "ls_wait_done": False,
+        "pending_ls_save": False,
+        "pending_ls_clear": False,
+        "reset_counter": 0,
         "persona_mode": "Not Selected",
+        "seed_params": {},
         "v_user": None,
         "excluded_ids": set(),
         "swiped_titles": [],
@@ -191,9 +206,7 @@ def init_session_state():
         "swipe_count": 0,
         "last_action_msg": "",
         "dataset_signature": "",
-        "ls_checked": False,
-        "reset_counter": 0,
-        "sidebar_params": None 
+        "sidebar_params": None
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -204,10 +217,9 @@ def process_swipe(
     action: str,
     df: pd.DataFrame,
     V_i,
-    V_artstyle,
     id_to_idx: dict,
     anime_lookup: dict,
-    anime_vectors: dict,
+    anime_vectors,
     gamma: float,
     alpha: float,
     beta: float,
@@ -241,7 +253,8 @@ def process_swipe(
         st.session_state.passed_ids.append(current_aid)
         st.session_state.last_action_msg = f"❌ PASSED: **{anime_row['title']}**"
 
-    is_eyecandy = (st.session_state.persona_mode == "Eyecandy First")
+    st.session_state.pending_ls_save = True
+
     st.session_state.deck = generate_diverse_deck(
         df=df,
         anime_vectors=anime_vectors,
@@ -255,11 +268,8 @@ def process_swipe(
         min_score=min_score,
         quality_weight=quality_weight,
         V_i=V_i,
-        V_artstyle=V_artstyle,
-        id_to_idx=id_to_idx,
-        is_eyecandy_mode=is_eyecandy
+        id_to_idx=id_to_idx
     )
-    save_profile_to_browser(st.session_state.dataset_signature)
 
 
 # ==============================================================================
@@ -273,8 +283,13 @@ def main():
         st.markdown("## 🔥 AniMatch")
     with top_c2:
         if st.button("🧭 Change Persona / Reset", use_container_width=True):
-            st.session_state.reset_counter += 1
-            clear_browser_profile()
+            st.session_state.pending_ls_clear = True
+            st.session_state.onboarded = False
+            st.session_state.liked_ids = []
+            st.session_state.passed_ids = []
+            st.session_state.excluded_ids = set()
+            st.session_state.swiped_titles = []
+            st.session_state.swipe_count = 0
             st.session_state.show_onboarding_modal = True
             st.rerun()
 
@@ -306,6 +321,8 @@ def main():
 
     if st.session_state.dataset_signature != sig:
         st.session_state.dataset_signature = sig
+        st.session_state.ls_checked = False
+        st.session_state.ls_wait_done = False
         st.session_state.onboarded = False
         st.session_state.v_user = None
         st.session_state.excluded_ids = set()
@@ -315,7 +332,6 @@ def main():
         st.session_state.passed_ids = []
         st.session_state.swipe_count = 0
         st.session_state.last_action_msg = ""
-        st.session_state.show_onboarding_modal = True
 
     with st.sidebar:
         st.header("⚙️ Algorithm Parameters")
@@ -330,61 +346,68 @@ def main():
         min_score = st.slider("Minimum Rating Score", 5.0, 8.5, 7.2, 0.1)
         quality_weight = st.slider("Quality Boost Weight", 0.0, 0.6, 0.25, 0.05)
 
-    V_i, V_artstyle, id_to_idx, anime_vectors, vectorizers, dims = build_multimodal_space(df)
+    V_i, id_to_idx, anime_vectors, vectorizers, dims = build_multimodal_space(df)
+    seeder = LapsedUserPriorSeeder(anime_vectors, vectorizers["genres"], W_G, dims["synopsis"], dims["studio"])
+
+    # 1. Thực thi lệnh ghi / xóa localStorage nếu có cờ chờ từ hành động trước
+    if st.session_state.pending_ls_clear:
+        clear_browser_profile()
+        st.session_state.pending_ls_clear = False
+    elif st.session_state.pending_ls_save:
+        save_profile_to_browser(sig)
+        st.session_state.pending_ls_save = False
+
+    # 2. Khôi phục hồ sơ từ localStorage khi mới mở trang hoặc F5
+    if not st.session_state.ls_checked:
+        restore_status = try_restore_profile_from_browser(
+            dataset_sig=sig,
+            anime_lookup=anime_lookup,
+            anime_vectors=anime_vectors,
+            seeder=seeder,
+            update_fn=update_user_vector_rocchio,
+            gamma=gamma,
+            alpha=alpha,
+            beta=beta
+        )
+        if restore_status == "pending":
+            st.caption("🔄 Syncing profile from browser storage...")
+        elif restore_status == "restored":
+            st.session_state.ls_checked = True
+            st.session_state.deck = generate_diverse_deck(
+                df, anime_vectors, st.session_state.v_user,
+                st.session_state.excluded_ids, st.session_state.swiped_titles, 8,
+                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+                V_i=V_i, id_to_idx=id_to_idx
+            )
+            st.toast(f"♻️ Restored your profile ({st.session_state.swipe_count} swipes)!")
+        else:
+            st.session_state.ls_checked = True
+            st.session_state.show_onboarding_modal = True
 
     expected_dim = V_i.shape[1]
     if st.session_state.v_user is None or st.session_state.v_user.shape[0] != expected_dim:
-        seeder = ContextualPriorSeeder(
-            anime_vectors, vectorizers["genres"], W_G, dims["synopsis"], dims["studio"], dims["artstyle"]
-        )
         v_user_0, excluded_ids = seeder.seed_cold_start("eyecandy_first", [])
         st.session_state.v_user = v_user_0
         st.session_state.excluded_ids = excluded_ids
         st.session_state.deck = generate_diverse_deck(
             df, anime_vectors, v_user_0, excluded_ids, [], 8,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-            V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=True
+            V_i=V_i, id_to_idx=id_to_idx
         )
 
-    is_eyecandy = (st.session_state.persona_mode == "Eyecandy First")
     current_sidebar_params = (mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight)
     if st.session_state.sidebar_params is not None and st.session_state.sidebar_params != current_sidebar_params:
         st.session_state.deck = generate_diverse_deck(
             df, anime_vectors, st.session_state.v_user,
             st.session_state.excluded_ids, st.session_state.swiped_titles, 8,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-            V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=is_eyecandy
+            V_i=V_i, id_to_idx=id_to_idx
         )
     st.session_state.sidebar_params = current_sidebar_params
 
-    if not st.session_state.ls_checked:
-        ls_status = try_restore_profile_from_browser(
-            dataset_sig=sig,
-            df=df,
-            anime_lookup=anime_lookup,
-            anime_vectors=anime_vectors,
-            expected_dim=expected_dim,
-            update_fn=update_user_vector_rocchio,
-            gamma=gamma,
-            alpha=alpha,
-            beta=beta
-        )
-        if ls_status == "restored":
-            st.session_state.ls_checked = True
-            is_ec = (st.session_state.persona_mode == "Eyecandy First")
-            st.session_state.deck = generate_diverse_deck(
-                df, anime_vectors, st.session_state.v_user,
-                st.session_state.excluded_ids, st.session_state.swiped_titles, 8,
-                mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-                V_i=V_i, V_artstyle=V_artstyle, id_to_idx=id_to_idx, is_eyecandy_mode=is_ec
-            )
-            st.toast("🔄 Restored your previous swipe session from browser storage!")
-        elif ls_status == "empty":
-            st.session_state.ls_checked = True
-
-    if st.session_state.show_onboarding_modal:
+    if st.session_state.ls_checked and st.session_state.show_onboarding_modal:
         open_onboarding_modal(
-            df, V_i, V_artstyle, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
+            df, V_i, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
         )
 
@@ -417,13 +440,8 @@ def main():
         exp_text = explanation_to_text(exp_dict)
 
         pos_keywords = []
-        for feat in ["genres", "artstyle", "synopsis", "studio"]:
-            pos_keywords.extend([f"{term} ({score:.2f})" for term, score in exp_dict["positive"].get(feat, [])])
-
-        # Nếu là Eyecandy First ở lượt đầu (chưa có từ khóa dương), hiển thị luôn tag Danbooru Artstyle của thẻ
-        if not pos_keywords and str(current_anime.get("artstyle_tags", "")).strip():
-            raw_art = [t.strip() for t in str(current_anime["artstyle_tags"]).split("|") if t.strip()][:4]
-            pos_keywords = [f"🎨 {t}" for t in raw_art]
+        for feat in ["genres", "synopsis", "studio"]:
+            pos_keywords.extend([f"{term} ({score:.2f})" for term, score in exp_dict["positive"][feat]])
 
         col_card, col_side = st.columns([1.2, 1])
 
@@ -437,13 +455,13 @@ def main():
 
             if st.button("BRIDGE_SWIPE_PASS", key="btn_bridge_pass"):
                 process_swipe(
-                    "pass", df, V_i, V_artstyle, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
+                    "pass", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
                     mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
                 )
                 st.rerun()
             if st.button("BRIDGE_SWIPE_LIKE", key="btn_bridge_like"):
                 process_swipe(
-                    "like", df, V_i, V_artstyle, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
+                    "like", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
                     mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
                 )
                 st.rerun()
@@ -454,40 +472,35 @@ def main():
                 st.info(st.session_state.last_action_msg)
 
             st.write(f"**Recommendation Rationale:** *{exp_text}*")
-            c_g, c_a, c_s, c_v = st.columns(4)
-            for idx, feat in enumerate(["genres", "artstyle", "synopsis", "studio"]):
-                with [c_g, c_a, c_s, c_v][idx]:
+            c_g, c_s, c_v = st.columns(3)
+            for idx, feat in enumerate(["genres", "synopsis", "studio"]):
+                with [c_g, c_s, c_v][idx]:
                     st.markdown(f"**+{feat.capitalize()}**")
-                    if exp_dict["positive"].get(feat):
+                    if exp_dict["positive"][feat]:
                         for term, sc in exp_dict["positive"][feat]:
                             st.caption(f"🟢 `{term}` (+{sc:.2f})")
                     else:
                         st.caption("*(None yet)*")
 
             st.markdown("---")
-            st.markdown("**🃏 Upcoming Diverse Deck (Artstyle MMR + Studio Cap):**")
-            BAD_ART_TAGS = {"male_focus", "female_focus", "cover", "poster", "solo_focus"}
+            st.markdown("**🃏 Upcoming Diverse Deck (MMR + Studio Cap):**")
             upcoming_rows = []
             for rank_idx, u_aid in enumerate(st.session_state.deck[:5], start=1):
                 r = anime_lookup[u_aid]
-                raw_tags = str(r.get("artstyle_tags", "")).strip()
-                clean_tags = [t.strip() for t in raw_tags.split("|") if t.strip()][:4]
-
                 upcoming_rows.append({
                     "#": "👉 Active" if rank_idx == 1 else f"#{rank_idx}",
                     "Anime": r["title"],
                     "Score": r["score"],
                     "Studio": get_main_studio(r["studios"]),
-                    "Artstyle (WD14)": ", ".join(clean_tags) if clean_tags else "standard_style"
+                    "Genres": r["genres"]
                 })
             st.dataframe(pd.DataFrame(upcoming_rows), use_container_width=True, hide_index=True)
 
     with st.expander(f"💚 Liked Anime ({len(st.session_state.liked_ids)}) & ⚖️ Side-by-Side Compare View", expanded=False):
         if st.session_state.liked_ids:
-            display_cols = ["anime_id", "title", "type", "genres", "studio", "score", "episodes", "year"]
-            if "artstyle_tags" in df.columns and df["artstyle_tags"].str.len().sum() > 0:
-                display_cols.insert(4, "artstyle_tags")
-            liked_df = df[df["anime_id"].isin(st.session_state.liked_ids)][display_cols]
+            liked_df = df[df["anime_id"].isin(st.session_state.liked_ids)][
+                ["anime_id", "title", "type", "genres", "studio", "score", "episodes", "year"]
+            ]
             st.dataframe(liked_df, use_container_width=True, hide_index=True)
         else:
             st.caption("No anime liked yet. Drag a card to the right to like it!")
@@ -505,9 +518,7 @@ def main():
 
             comp = compare_anime(df, anime_label_map[c1], anime_label_map[c2])
             comp_rows = []
-            for attr in ["Genres", "Themes", "Artstyle", "Studio"]:
-                if attr not in comp:
-                    continue
+            for attr in ["Genres", "Themes", "Studio"]:
                 vals = comp[attr]
                 comp_rows.append({
                     "Attribute": attr,

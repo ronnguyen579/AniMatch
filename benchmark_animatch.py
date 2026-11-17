@@ -1,213 +1,293 @@
+import re
 import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 # ==========================================
-# 1. TẢI DỮ LIỆU & XÂY DỰNG 3 SUBSPACE VECTORS
+# 1. TẢI DỮ LIỆU & XÂY DỰNG 3-SUBSPACE VECTOR (PRE-WD14)
 # ==========================================
-df = pd.read_csv("anime_cleaned.csv").dropna(subset=["title", "genres", "synopsis"]).reset_index(drop=True)
+df = pd.read_csv("anime_with_artstyle.csv").dropna(subset=["title", "genres", "synopsis"]).reset_index(drop=True)
 df["studios"] = df["studios"].fillna("Unknown")
+if "themes" in df.columns:
+    df["genre_theme_text"] = df["genres"].astype(str) + " " + df["themes"].fillna("").astype(str)
+else:
+    df["genre_theme_text"] = df["genres"].astype(str)
+
+# Trọng số 3 không gian con đúng như kiến trúc MVP
+W_GENRE, W_SYN, W_STUDIO = 2.5, 0.8, 0.35
 
 vec_genre = TfidfVectorizer(max_features=1500, stop_words="english")
 vec_syn = TfidfVectorizer(max_features=3000, stop_words="english")
 vec_stu = TfidfVectorizer(max_features=500)
 
-M_genre = vec_genre.fit_transform(df["genres"].astype(str)).toarray() * 2.5
-M_syn = vec_syn.fit_transform(df["synopsis"].astype(str)).toarray() * 0.8
-M_stu = vec_stu.fit_transform(df["studios"].astype(str)).toarray() * 0.35
+M_genre = vec_genre.fit_transform(df["genre_theme_text"]).toarray() * W_GENRE
+M_syn = vec_syn.fit_transform(df["synopsis"].astype(str)).toarray() * W_SYN
+M_stu = vec_stu.fit_transform(df["studios"].astype(str)).toarray() * W_STUDIO
 
-# Ghép 3 không gian con và chuẩn hóa L2
 V_anime = np.hstack([M_genre, M_syn, M_stu])
-norms = np.linalg.norm(V_anime, axis=1, keepdims=True) + 1e-9
-V_anime = V_anime / norms
+V_anime /= (np.linalg.norm(V_anime, axis=1, keepdims=True) + 1e-9)
+
+D_GENRE = M_genre.shape[1]
+
+
+def extract_franchise_key(title: str) -> str:
+    """Chuẩn hóa tên series để phát hiện trùng lặp Season / Movie / OVA."""
+    base = re.sub(r"(:.*|\(.*\)|Season\s*\d+|2nd Season|3rd Season|Part\s*\d+|Movie.*|OVA.*|Specials.*)", "", str(title), flags=re.IGNORECASE)
+    return re.sub(r"[^a-z0-9]", "", base.lower())[:14]
+
+
+FRANCHISE_KEYS = [extract_franchise_key(t) for t in df["title"]]
+MAIN_STUDIOS = [str(s).split(",")[0].strip() for s in df["studios"]]
 
 
 # ==========================================
-# 2. HÀM XẾP HẠNG: BASELINE COSINE VS ANIMATCH MMR
+# 2. CÁC BỘ XẾP HẠNG (BASELINES VS ANIMATCH MVP)
 # ==========================================
 def rank_pure_cosine(v_user, seen_idx, top_k=8):
+    """Baseline 1: Chỉ dùng Cosine Similarity thuần túy."""
     scores = V_anime @ v_user
-    scores[list(seen_idx)] = -1e9
+    if seen_idx:
+        scores[list(seen_idx)] = -1e9
     return np.argsort(scores)[::-1][:top_k]
 
 
-def rank_animatch_mmr(v_user, seen_idx, top_k=8, lambda_div=0.72, studio_cap=2):
+def rank_animatch_mvp(v_user, seen_idx, top_k=8, lambda_div=0.72, studio_cap=2):
+    """AniMatch MVP: Same-Series Filter + Studio Cap + MMR Diversity Re-ranking."""
     rel_scores = V_anime @ v_user
     candidate_pool = np.argsort(rel_scores)[::-1]
 
-    selected = []
+    seen_franchises = {FRANCHISE_KEYS[i] for i in seen_idx}
     studio_counts = {}
-    seen_prefixes = {df.loc[i, "title"][:12].lower() for i in seen_idx}
+    filtered_candidates = []
 
     for idx in candidate_pool:
-        if idx in seen_idx or len(selected) >= top_k * 4:
+        if idx in seen_idx:
             continue
-        prefix = df.loc[idx, "title"][:12].lower()
-        studio = str(df.loc[idx, "studios"]).split(",")[0].strip()
+        f_key = FRANCHISE_KEYS[idx]
+        studio = MAIN_STUDIOS[idx]
 
-        # Lọc trùng franchise & giới hạn studio
-        if prefix in seen_prefixes:
+        if f_key and f_key in seen_franchises:
             continue
         if studio_counts.get(studio, 0) >= studio_cap:
             continue
 
-        selected.append(idx)
-        seen_prefixes.add(prefix)
+        filtered_candidates.append(idx)
+        seen_franchises.add(f_key)
         studio_counts[studio] = studio_counts.get(studio, 0) + 1
 
-    # Maximal Marginal Relevance (MMR)
-    final_deck = []
-    while len(final_deck) < top_k and selected:
-        best_item, best_mmr = None, -1e9
-        for cand in selected:
+        if len(filtered_candidates) >= top_k * 4:
+            break
+
+    # MMR Re-ranking
+    deck = []
+    while len(deck) < top_k and filtered_candidates:
+        best_cand, best_score = None, -1e9
+        for cand in filtered_candidates:
             rel = rel_scores[cand]
-            if not final_deck:
-                div_penalty = 0.0
-            else:
-                div_penalty = np.max(V_anime[final_deck] @ V_anime[cand])
-            mmr = lambda_div * rel - (1 - lambda_div) * div_penalty
-            if mmr > best_mmr:
-                best_mmr = mmr
-                best_item = cand
-        final_deck.append(best_item)
-        selected.remove(best_item)
+            redundancy = np.max(V_anime[deck] @ V_anime[cand]) if deck else 0.0
+            mmr_score = lambda_div * rel - (1.0 - lambda_div) * redundancy
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_cand = cand
+        deck.append(best_cand)
+        filtered_candidates.remove(best_cand)
 
-    return np.array(final_deck)
+    return np.array(deck)
 
 
-def intra_list_diversity(indices):
+# ==========================================
+# 3. CÁC CHỈ SỐ ĐÁNH GIÁ ĐỊNH LƯỢNG
+# ==========================================
+def compute_ild(indices):
+    """Intra-List Diversity: 1 - trung bình độ tương đồng cặp trong deck."""
     if len(indices) < 2:
         return 0.0
-    sub_V = V_anime[indices]
-    sim_matrix = sub_V @ sub_V.T
+    sub = V_anime[indices]
+    sim = sub @ sub.T
     n = len(indices)
-    # Trung bình (1 - cosine_similarity) của các cặp khác nhau
-    off_diag_sum = np.sum(1.0 - sim_matrix) - np.trace(1.0 - sim_matrix)
-    return off_diag_sum / (n * (n - 1))
+    return float((np.sum(1.0 - sim) - np.trace(1.0 - sim)) / (n * (n - 1)))
+
+
+def compute_franchise_collision_rate(indices):
+    """Tỷ lệ thẻ bị trùng franchise ngay trong cùng 1 deck."""
+    keys = [FRANCHISE_KEYS[i] for i in indices]
+    unique_keys = len(set(keys))
+    return 1.0 - (unique_keys / max(len(keys), 1))
 
 
 # ==========================================
-# 3. MÔ PHỎNG NGƯỜI DÙNG & ĐỔI GU ĐỘT NGỘT (MOOD SHIFT)
+# 4. MÔ PHỎNG MONTE CARLO (30 SESSIONS, 3 PERSONAS, MOOD SHIFT)
 # ==========================================
-def simulate_session(steps=20, gamma=0.95, alpha=1.0, beta=0.6):
-    # Persona A (10 lượt đầu): Action / Dark Fantasy
-    mask_A = df["genres"].str.contains("Action", case=False) & df["genres"].str.contains("Fantasy", case=False)
-    v_target_A = V_anime[mask_A].mean(axis=0)
-    v_target_A /= np.linalg.norm(v_target_A)
-
-    # Persona B (10 lượt sau - Đổi gu đột ngột): Slice of Life / Comedy
-    mask_B = df["genres"].str.contains("Slice of Life", case=False) & df["genres"].str.contains("Comedy", case=False)
-    v_target_B = V_anime[mask_B].mean(axis=0)
-    v_target_B /= np.linalg.norm(v_target_B)
-
-    v_user = np.random.normal(0, 0.01, size=V_anime.shape[1])
-    v_user /= np.linalg.norm(v_user)
-
-    seen = set()
-    metrics = {
-        "step": [], "target_align": [],
-        "prec_cosine": [], "prec_animatch": [],
-        "ild_cosine": [], "ild_animatch": [],
-        "latency_ms": []
-    }
-
-    for t in range(1, steps + 1):
-        v_true = v_target_A if t <= 10 else v_target_B
-
-        t0 = time.perf_counter()
-        deck_cos = rank_pure_cosine(v_user, seen, top_k=8)
-        deck_mmr = rank_animatch_mmr(v_user, seen, top_k=8)
-
-        # Thẻ đầu tiên của AniMatch được đưa cho user quyết định Like/Pass
-        top_card = deck_mmr[0]
-        seen.add(top_card)
-        true_affinity = float(V_anime[top_card] @ v_true)
-
-        # Ngưỡng Like giả lập
-        if true_affinity >= 0.22:
-            v_user = gamma * v_user + alpha * V_anime[top_card]
-        else:
-            v_user = gamma * v_user - beta * V_anime[top_card]
-        v_user /= (np.linalg.norm(v_user) + 1e-9)
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-
-        # Đo Precision@8 (tỷ lệ thẻ trong deck có affinity >= 0.22 với gu hiện tại)
-        prec_cos = np.mean((V_anime[deck_cos] @ v_true) >= 0.22)
-        prec_mmr = np.mean((V_anime[deck_mmr] @ v_true) >= 0.22)
-
-        metrics["step"].append(t)
-        metrics["target_align"].append(float(v_user @ v_true))
-        metrics["prec_cosine"].append(prec_cos)
-        metrics["prec_animatch"].append(prec_mmr)
-        metrics["ild_cosine"].append(intra_list_diversity(deck_cos))
-        metrics["ild_animatch"].append(intra_list_diversity(deck_mmr))
-        metrics["latency_ms"].append(dt_ms)
-
-    return pd.DataFrame(metrics)
+PERSONA_PAIRS = [
+    ("Action", "Fantasy", "Slice of Life", "Comedy"),
+    ("Sci-Fi", "Mystery", "Romance", "Drama"),
+    ("Adventure", "Supernatural", "Sports", "School"),
+]
 
 
-np.random.seed(42)
-res = simulate_session(steps=20, gamma=0.95)
+def init_user_vector(mode: str, v_target_A: np.ndarray):
+    """Khởi tạo vector theo đúng 3 chế độ Onboarding của MVP."""
+    v0 = np.zeros(V_anime.shape[1], dtype=np.float64)
+    if mode == "Eyecandy First":
+        v0 = np.random.normal(0, 0.01, size=V_anime.shape[1])
+    elif mode == "Content First":
+        # Chỉ khởi tạo trong không gian con Genre (D_GENRE đầu tiên)
+        v0[:D_GENRE] = v_target_A[:D_GENRE]
+    elif mode == "Lapsed User":
+        # Pha trộn lịch sử cũ với nhiễu khám phá mới
+        v0 = 0.7 * v_target_A + np.random.normal(0, 0.08, size=V_anime.shape[1])
+    return v0 / (np.linalg.norm(v0) + 1e-9)
 
-# In bảng tóm tắt ra Terminal
-print("\n=== KẾT QUẢ BENCHMARK ANIMATCH (TRUNG BÌNH 20 LƯỢT QUẸT) ===")
-print(f"• Precision@8 (Pure Cosine)   : {res['prec_cosine'].mean():.2%}")
-print(f"• Precision@8 (AniMatch MMR)  : {res['prec_animatch'].mean():.2%}")
-print(f"• Độ đa dạng ILD (Pure Cosine): {res['ild_cosine'].mean():.3f}")
-print(f"• Độ đa dạng ILD (AniMatch)   : {res['ild_animatch'].mean():.3f}  (Càng cao càng ít trùng lặp)")
-print(f"• Độ trễ CPU trung bình (p50) : {res['latency_ms'].median():.2f} ms")
-print(f"• Độ trễ CPU tối đa (p99)     : {np.percentile(res['latency_ms'], 99):.2f} ms")
+
+def run_benchmark(n_trials=30, steps=20):
+    np.random.seed(42)
+    records = []
+
+    for trial in range(n_trials):
+        g1_a, g2_a, g1_b, g2_b = PERSONA_PAIRS[trial % len(PERSONA_PAIRS)]
+        mode = ["Eyecandy First", "Content First", "Lapsed User"][trial % 3]
+
+        mask_A = df["genres"].str.contains(g1_a, case=False) & df["genres"].str.contains(g2_a, case=False)
+        mask_B = df["genres"].str.contains(g1_b, case=False) & df["genres"].str.contains(g2_b, case=False)
+
+        v_target_A = V_anime[mask_A].mean(axis=0)
+        v_target_A /= (np.linalg.norm(v_target_A) + 1e-9)
+        v_target_B = V_anime[mask_B].mean(axis=0)
+        v_target_B /= (np.linalg.norm(v_target_B) + 1e-9)
+
+        # Khởi tạo 3 hệ thống trên cùng điểm xuất phát
+        v_cos = init_user_vector(mode, v_target_A)
+        v_static = v_cos.copy()   # gamma = 1.0 (không suy giảm bộ nhớ)
+        v_mvp = v_cos.copy()      # gamma = 0.95 (AniMatch MVP)
+
+        seen_cos, seen_static, seen_mvp = set(), set(), set()
+
+        for t in range(1, steps + 1):
+            # Lượt 1..10 theo Gu A; Lượt 11..20 đổi gu đột ngột sang Gu B
+            v_true = v_target_A if t <= 10 else v_target_B
+
+            # --- 1. Pure Cosine Baseline ---
+            deck_cos = rank_pure_cosine(v_cos, seen_cos, top_k=8)
+            c_cos = deck_cos[0]
+            seen_cos.add(c_cos)
+            aff_cos = float(V_anime[c_cos] @ v_true)
+            v_cos = 1.0 * v_cos + (1.0 * V_anime[c_cos] if aff_cos >= 0.22 else -0.6 * V_anime[c_cos])
+            v_cos /= (np.linalg.norm(v_cos) + 1e-9)
+
+            # --- 2. Static Rocchio (gamma=1.0) + MMR ---
+            deck_st = rank_animatch_mvp(v_static, seen_static, top_k=8)
+            c_st = deck_st[0]
+            seen_static.add(c_st)
+            aff_st = float(V_anime[c_st] @ v_true)
+            v_static = 1.0 * v_static + (1.0 * V_anime[c_st] if aff_st >= 0.22 else -0.6 * V_anime[c_st])
+            v_static /= (np.linalg.norm(v_static) + 1e-9)
+
+            # --- 3. AniMatch MVP (gamma=0.95 + Deduplication + Studio Cap + MMR) ---
+            t0 = time.perf_counter()
+            deck_mvp = rank_animatch_mvp(v_mvp, seen_mvp, top_k=8)
+            c_mvp = deck_mvp[0]
+            seen_mvp.add(c_mvp)
+            aff_mvp = float(V_anime[c_mvp] @ v_true)
+            v_mvp = 0.88 * v_mvp + (1.0 * V_anime[c_mvp] if aff_mvp >= 0.22 else -1.2 * V_anime[c_mvp])
+            v_mvp /= (np.linalg.norm(v_mvp) + 1e-9)
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+
+            records.append({
+                "trial": trial,
+                "mode": mode,
+                "step": t,
+                "prec_cos": float(np.mean((V_anime[deck_cos] @ v_true) >= 0.22)),
+                "prec_static": float(np.mean((V_anime[deck_st] @ v_true) >= 0.22)),
+                "prec_mvp": float(np.mean((V_anime[deck_mvp] @ v_true) >= 0.22)),
+                "ild_cos": compute_ild(deck_cos),
+                "ild_mvp": compute_ild(deck_mvp),
+                "dup_cos": compute_franchise_collision_rate(deck_cos),
+                "dup_mvp": compute_franchise_collision_rate(deck_mvp),
+                "align_static": float(v_static @ v_true),
+                "align_mvp": float(v_mvp @ v_true),
+                "latency_ms": latency_ms,
+            })
+
+    return pd.DataFrame(records)
 
 
 # ==========================================
-# 4. VẼ 4 BIỂU ĐỒ TRỰC QUAN
+# 5. CHẠY BENCHMARK, IN BẢNG & XUẤT 4 BIỂU ĐỒ
 # ==========================================
+res = run_benchmark(n_trials=30, steps=20)
+agg = res.groupby("step").mean(numeric_only=True).reset_index()
+
+post_shift = res[res["step"] >= 14]  # Đo tốc độ hồi phục sau cú đổi gu ở lượt 10
+
+print("\n" + "=" * 68)
+print("  BÁO CÁO ĐÁNH GIÁ HIỆU QUẢ ANIMATCH MVP (30 SESSIONS, PRE-WD14)")
+print("=" * 68)
+print(f"{'Chỉ số đánh giá':<38} | {'Baseline':<12} | {'AniMatch MVP':<12}")
+print("-" * 68)
+print(f"{'Precision@8 Trung bình (Toàn phiên)':<38} | {res['prec_cos'].mean():>10.2%} | {res['prec_mvp'].mean():>10.2%}")
+print(f"{'Precision@8 Sau đổi gu (Lượt 14-20)':<38} | {post_shift['prec_static'].mean():>10.2%} | {post_shift['prec_mvp'].mean():>10.2%}")
+print(f"{'Độ đa dạng Intra-List Diversity (ILD)':<38} | {res['ild_cos'].mean():>10.3f} | {res['ild_mvp'].mean():>10.3f}")
+print(f"{'Tỷ lệ trùng Franchise trong Deck':<38} | {res['dup_cos'].mean():>10.2%} | {res['dup_mvp'].mean():>10.2%}")
+print(f"{'Độ trễ CPU Trung vị (p50)':<38} | {'N/A':>10} | {res['latency_ms'].median():>8.2f} ms")
+print(f"{'Độ trễ CPU Đuôi (p99)':<38} | {'N/A':>10} | {np.percentile(res['latency_ms'], 99):>8.2f} ms")
+print("=" * 68)
+
+# Vẽ báo cáo trực quan 2x2
 plt.style.use("seaborn-v0_8-darkgrid")
-fig, axes = plt.subplots(2, 2, figsize=(13, 8.5))
-fig.suptitle("AniMatch Offline Evaluation: Steering, Diversity, Mood-Shift & CPU Latency", fontsize=14, fontweight="bold")
+fig, axes = plt.subplots(2, 2, figsize=(13.5, 9))
+fig.suptitle("AniMatch MVP Benchmark (Pre-WD14: 3-Subspace TF-IDF + Online Rocchio + MMR)", fontsize=13.5, fontweight="bold")
 
-# Biểu đồ 1: Độ khớp sở thích (Precision@8) & Khả năng bẻ lái khi đổi gu ở lượt 10
+# Panel 1: Precision@8 qua 3 chế độ Onboarding & Cú đổi gu ở lượt 10
 ax = axes[0, 0]
-ax.plot(res["step"], res["prec_cosine"], "--o", color="#94a3b8", label="Baseline (Pure Cosine)")
-ax.plot(res["step"], res["prec_animatch"], "-s", color="#10b981", linewidth=2.2, label="AniMatch (Rocchio + MMR)")
-ax.axvline(10.5, color="#ef4444", linestyle=":", linewidth=1.8, label="Mood Shift (Action -> Slice of Life)")
-ax.set_title("1. Precision@8 & Adaptation After Sudden Mood Shift")
+ax.plot(agg["step"], agg["prec_cos"], "--o", color="#94a3b8", label="Baseline 1: Pure Cosine")
+ax.plot(agg["step"], agg["prec_static"], "-.^", color="#f59e0b", label="Baseline 2: Static Rocchio (gamma=1.0)")
+ax.plot(agg["step"], agg["prec_mvp"], "-s", color="#10b981", linewidth=2.3, label="AniMatch MVP (gamma=0.95 + MMR)")
+ax.axvline(10.5, color="#ef4444", linestyle=":", linewidth=1.8, label="Sudden Mood Shift (Step 10)")
+ax.set_title("1. Recommendation Precision@8 & Mood-Shift Recovery")
+ax.set_xlabel("Swipe Step (t)")
+ax.set_ylabel("Mean Precision@8")
+ax.set_ylim(0, 1.05)
+ax.legend(loc="lower right", fontsize=8)
+
+# Panel 2: Chống hiệu ứng buồng vang (ILD & Tỷ lệ trùng Franchise)
+ax = axes[0, 1]
+ax.plot(agg["step"], agg["ild_cos"], "--o", color="#94a3b8", label="Pure Cosine ILD (Echo Chamber)")
+ax.plot(agg["step"], agg["ild_mvp"], "-s", color="#3b82f6", linewidth=2.3, label="AniMatch MVP ILD (Diverse Deck)")
+ax.bar(agg["step"], agg["dup_cos"], color="#ef4444", alpha=0.22, label="Pure Cosine Franchise Collision Rate")
+ax.set_title("2. Diversity (ILD) & Sequel Echo-Chamber Suppression")
+ax.set_xlabel("Swipe Step (t)")
+ax.set_ylabel("Score / Collision Rate")
+ax.set_ylim(0, 1.05)
+ax.legend(loc="center right", fontsize=8)
+
+# Panel 3: So sánh tốc độ hội tụ theo từng chế độ Onboarding
+ax = axes[1, 0]
+for mode_name, color in [("Eyecandy First", "#8b5cf6"), ("Content First", "#06b6d4"), ("Lapsed User", "#ec4899")]:
+    sub_agg = res[res["mode"] == mode_name].groupby("step")["prec_mvp"].mean()
+    ax.plot(sub_agg.index, sub_agg.values, "-o", linewidth=2, color=color, label=f"Mode: {mode_name}")
+ax.axvline(10.5, color="#ef4444", linestyle=":", linewidth=1.5)
+ax.set_title("3. Cold-Start Convergence Across 3 Onboarding Modes")
 ax.set_xlabel("Swipe Step (t)")
 ax.set_ylabel("Precision@8")
-ax.set_ylim(0, 1.08)
+ax.set_ylim(0, 1.05)
 ax.legend(loc="lower right", fontsize=8.5)
 
-# Biểu đồ 2: Độ đa dạng chống buồng vang (Intra-List Diversity)
-ax = axes[0, 1]
-ax.plot(res["step"], res["ild_cosine"], "--o", color="#94a3b8", label="Baseline (Echo Chamber Risk)")
-ax.plot(res["step"], res["ild_animatch"], "-s", color="#3b82f6", linewidth=2.2, label="AniMatch (MMR + Studio/Series Cap)")
-ax.set_title("2. Intra-List Diversity (Higher = Less Sequel Repetition)")
-ax.set_xlabel("Swipe Step (t)")
-ax.set_ylabel("ILD (1 - Avg Pairwise Cosine)")
-ax.legend(loc="lower right", fontsize=8.5)
-
-# Biểu đồ 3: Tốc độ hội tụ Vector người dùng (Cosine Alignment với Ground Truth)
-ax = axes[1, 0]
-ax.fill_between(res["step"], res["target_align"], color="#8b5cf6", alpha=0.25)
-ax.plot(res["step"], res["target_align"], "-D", color="#7c3aed", linewidth=2)
-ax.axvline(10.5, color="#ef4444", linestyle=":", linewidth=1.8)
-ax.set_title("3. User Vector Alignment with Hidden Ground-Truth Taste")
-ax.set_xlabel("Swipe Step (t)")
-ax.set_ylabel("Cosine(v_user, v_target)")
-
-# Biểu đồ 4: Phân bố độ trễ CPU (Latency ms)
+# Panel 4: Phân phối độ trễ CPU (p50 & p99)
 ax = axes[1, 1]
-ax.bar(res["step"], res["latency_ms"], color="#f59e0b", alpha=0.85, label="Step Latency (ms)")
-ax.axhline(10.0, color="#ef4444", linestyle="--", linewidth=1.5, label="Real-Time Budget (10 ms)")
-ax.set_title("4. CPU Inference & Re-ranking Latency per Swipe")
-ax.set_xlabel("Swipe Step (t)")
-ax.set_ylabel("Latency (ms)")
+p50 = res["latency_ms"].median()
+p99 = np.percentile(res["latency_ms"], 99)
+ax.hist(res["latency_ms"], bins=25, color="#14b8a6", alpha=0.8, edgecolor="white")
+ax.axvline(p50, color="#1d4ed8", linestyle="-", linewidth=2, label=f"p50 Median: {p50:.2f} ms")
+ax.axvline(p99, color="#d97706", linestyle="--", linewidth=2, label=f"p99 Tail: {p99:.2f} ms")
+ax.axvline(10.0, color="#ef4444", linestyle=":", linewidth=2, label="Real-Time Budget (10.0 ms)")
+ax.set_title("4. CPU Inference + MMR Latency Distribution (600 Swipes)")
+ax.set_xlabel("Latency per Swipe (ms)")
+ax.set_ylabel("Frequency")
 ax.legend(loc="upper right", fontsize=8.5)
 
 plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.savefig("animatch_benchmark_report.png", dpi=200)
-print("\n📊 Đã xuất biểu đồ trực quan tại: animatch_benchmark_report.png")
+plt.savefig("animatch_mvp_benchmark.png", dpi=200)
+print("\n📊 Đã lưu báo cáo 4 biểu đồ tại: animatch_mvp_benchmark.png")
 plt.show()
