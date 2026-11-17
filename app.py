@@ -421,6 +421,7 @@ def process_swipe(
     franchise_thresh: int,
     min_score: float = 7.2,
     quality_weight: float = 0.25
+    length_filter: str = "All Lengths"
 ):
     if not st.session_state.deck:
         return
@@ -765,21 +766,21 @@ def main():
             if st.button("BRIDGE_SWIPE_PASS", key="btn_bridge_pass"):
                 process_swipe(
                     "pass", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
-                    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+                    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight, length_filter
                 )
                 st.session_state.pending_ls_save = True
                 st.rerun()
             if st.button("BRIDGE_SWIPE_LIKE", key="btn_bridge_like"):
                 process_swipe(
                     "like", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
-                    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+                    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight, length_filter
                 )
                 st.session_state.pending_ls_save = True
                 st.rerun()
             if st.button("BRIDGE_SWIPE_WATCHED", key="btn_bridge_watched"):
                 process_swipe(
                     "watched", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
-                    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+                    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight, length_filter
                 )
                 st.session_state.pending_ls_save = True
                 st.rerun()
