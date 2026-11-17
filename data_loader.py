@@ -370,4 +370,6 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
         entry_id_map[aid] = resolved_entry
 
     df["entry_anime_id"] = df["anime_id"].astype(int).map(entry_id_map)
+    id_to_title = dict(zip(df["anime_id"].astype(int), df["title"].astype(str)))
+    df["parent_title"] = df["entry_anime_id"].map(id_to_title).fillna("")
     return df
