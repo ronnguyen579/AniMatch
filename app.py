@@ -682,20 +682,6 @@ def main():
         st.session_state.deck = []
     st.session_state.sidebar_params = current_sidebar_params
 
-    if (
-        prev_params is None
-        or prev_params != current_sidebar_params
-        or not st.session_state.get("deck")
-        or active_card_invalid
-    ):
-        st.session_state.deck = generate_diverse_deck(
-            df, anime_vectors, st.session_state.v_user,
-            _get_all_excluded_ids(df, length_filter), st.session_state.swiped_titles, 8,
-            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-            V_i=V_i, id_to_idx=id_to_idx
-        )
-    st.session_state.sidebar_params = current_sidebar_params
-    
     if st.session_state.get("show_onboarding_modal", False):
         open_onboarding_modal(
             df, V_i, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
