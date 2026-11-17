@@ -119,6 +119,11 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             will-change: transform;
             display: flex;
             flex-direction: column;
+            <div class="hint-bar">
+                <span class="hint-left">⬅️ [←] PASS</span>
+                <span class="hint-up">⬆️ [↑] Trailer • ⬇️ [↓] Watched</span>
+                <span class="hint-right">LIKE [→] ➡️</span>
+            </div>;
         }}
         .tinder-card:active {{ cursor: grabbing; }}
         .poster-wrap {{
@@ -199,6 +204,11 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             background: rgba(15, 23, 42, 0.85);
             font-size: 20px;
             white-space: nowrap;
+        }}
+        .stamp-watched {{
+            top: 40px; left: 50%; transform: translateX(-50%);
+            color: #c084fc; border-color: #c084fc;
+            background: rgba(192, 132, 252, 0.16);
         }}
         .card-body {{
             padding: 12px 18px 14px 18px;
@@ -374,6 +384,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                 <div id="stampLike" class="stamp stamp-like">LIKE 💚</div>
                 <div id="stampPass" class="stamp stamp-pass">PASS ❌</div>
                 <div id="stampInfo" class="stamp stamp-info">INFO & TRAILER ⬆️</div>
+                <div class="stamp stamp-watched" id="stampWatched">ALREADY WATCHED</div>
 
                 <div class="poster-wrap">
                     <img src="{img_url}" alt="Poster" onerror="this.src='https://placehold.co/600x850/1e1b4b/f43f5e?text=Anime+Poster'"/>
@@ -434,6 +445,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             const stampLike = document.getElementById('stampLike');
             const stampPass = document.getElementById('stampPass');
             const stampInfo = document.getElementById('stampInfo');
+            const stampWatched = document.getElementById('stampWatched');
             const detailDrawer = document.getElementById('detailDrawer');
             const btnCloseDrawer = document.getElementById('btnCloseDrawer');
             const btnOpenDrawer = document.getElementById('btnOpenDrawer');
@@ -444,6 +456,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             let startX = 0, startY = 0, currentX = 0, currentY = 0;
             const SWIPE_X_THRESHOLD = 100;
             const SWIPE_UP_THRESHOLD = -80;
+            const SWIPE_DOWN_THRESHOLD = 85;
 
             function openDrawer() {{
                 isDrawerOpen = true;
@@ -453,6 +466,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                 stampLike.style.opacity = 0;
                 stampPass.style.opacity = 0;
                 stampInfo.style.opacity = 0;
+                stampWatched.style.opacity = 0;
             }}
 
             function closeDrawer() {{
@@ -476,7 +490,10 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             detailDrawer.addEventListener('pointerdown', (e) => e.stopPropagation());
 
             function triggerStreamlitSwipe(direction) {{
-                const targetMarker = direction === 'right' ? 'BRIDGE_SWIPE_LIKE' : 'BRIDGE_SWIPE_PASS';
+                let targetMarker = 'BRIDGE_SWIPE_PASS';
+                if (direction === 'right') targetMarker = 'BRIDGE_SWIPE_LIKE';
+                else if (direction === 'down') targetMarker = 'BRIDGE_SWIPE_WATCHED';
+
                 try {{
                     const parentButtons = window.parent.document.querySelectorAll('button');
                     for (const btn of parentButtons) {{
@@ -510,12 +527,22 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                     stampInfo.style.opacity = Math.min((Math.abs(currentY) - 20) / 60, 1);
                     stampLike.style.opacity = 0;
                     stampPass.style.opacity = 0;
+                    stampWatched.style.opacity = 0;
                     card.style.borderColor = 'rgba(56, 189, 248, 0.8)';
+                }} else if (currentY > 25 && Math.abs(currentY) > Math.abs(currentX)) {{
+                    const dropY = Math.min(currentY * 0.65, 160);
+                    card.style.transform = `translate(0px, ${{dropY}}px) scale(0.97)`;
+                    stampWatched.style.opacity = Math.min((currentY - 25) / 60, 1);
+                    stampLike.style.opacity = 0;
+                    stampPass.style.opacity = 0;
+                    stampInfo.style.opacity = 0;
+                    card.style.borderColor = 'rgba(192, 132, 252, 0.85)';
                 }} else {{
                     const dampY = currentY * 0.25;
                     const rotate = currentX * 0.06;
                     card.style.transform = `translate(${{currentX}}px, ${{dampY}}px) rotate(${{rotate}}deg)`;
                     stampInfo.style.opacity = 0;
+                    stampWatched.style.opacity = 0;
 
                     if (currentX > 20) {{
                         stampLike.style.opacity = Math.min((currentX - 20) / 80, 1);
@@ -536,24 +563,29 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             function endDrag() {{
                 if (!isDragging || isDrawerOpen) return;
                 isDragging = false;
-                card.style.transition = 'transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.26s ease';
+                card.style.transition = 'transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease';
 
                 if (currentY <= SWIPE_UP_THRESHOLD && Math.abs(currentY) > Math.abs(currentX)) {{
                     openDrawer();
+                }} else if (currentY >= SWIPE_DOWN_THRESHOLD && Math.abs(currentY) > Math.abs(currentX)) {{
+                    card.style.transform = 'translate(0px, 520px) scale(0.92)';
+                    card.style.opacity = '0';
+                    setTimeout(() => triggerStreamlitSwipe('down'), 110);
                 }} else if (currentX >= SWIPE_X_THRESHOLD) {{
                     card.style.transform = `translate(650px, ${{currentY * 0.25}}px) rotate(28deg)`;
                     card.style.opacity = '0';
-                    setTimeout(() => triggerStreamlitSwipe('right'), 170);
+                    setTimeout(() => triggerStreamlitSwipe('right'), 110);
                 }} else if (currentX <= -SWIPE_X_THRESHOLD) {{
                     card.style.transform = `translate(-650px, ${{currentY * 0.25}}px) rotate(-28deg)`;
                     card.style.opacity = '0';
-                    setTimeout(() => triggerStreamlitSwipe('left'), 170);
+                    setTimeout(() => triggerStreamlitSwipe('left'), 110);
                 }} else {{
                     card.style.transform = 'translate(0px, 0px) rotate(0deg)';
                     card.style.borderColor = 'rgba(255, 255, 255, 0.14)';
                     stampLike.style.opacity = 0;
                     stampPass.style.opacity = 0;
                     stampInfo.style.opacity = 0;
+                    stampWatched.style.opacity = 0;
                 }}
                 currentX = 0;
                 currentY = 0;
@@ -578,21 +610,30 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                 if (e.key === 'ArrowRight') {{
                     e.preventDefault();
                     isAnimatingKeyboard = true;
-                    card.style.transition = 'transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.26s ease';
+                    card.style.transition = 'transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease';
                     stampLike.style.opacity = 1;
                     card.style.borderColor = 'rgba(16, 185, 129, 0.75)';
                     card.style.transform = 'translate(650px, 20px) rotate(28deg)';
                     card.style.opacity = '0';
-                    setTimeout(() => triggerStreamlitSwipe('right'), 170);
+                    setTimeout(() => triggerStreamlitSwipe('right'), 110);
                 }} else if (e.key === 'ArrowLeft') {{
                     e.preventDefault();
                     isAnimatingKeyboard = true;
-                    card.style.transition = 'transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.26s ease';
+                    card.style.transition = 'transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease';
                     stampPass.style.opacity = 1;
                     card.style.borderColor = 'rgba(244, 63, 94, 0.75)';
                     card.style.transform = 'translate(-650px, 20px) rotate(-28deg)';
                     card.style.opacity = '0';
-                    setTimeout(() => triggerStreamlitSwipe('left'), 170);
+                    setTimeout(() => triggerStreamlitSwipe('left'), 110);
+                }} else if (e.key === 'ArrowDown') {{
+                    e.preventDefault();
+                    isAnimatingKeyboard = true;
+                    card.style.transition = 'transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease';
+                    stampWatched.style.opacity = 1;
+                    card.style.borderColor = 'rgba(192, 132, 252, 0.85)';
+                    card.style.transform = 'translate(0px, 520px) scale(0.92)';
+                    card.style.opacity = '0';
+                    setTimeout(() => triggerStreamlitSwipe('down'), 110);
                 }} else if (e.key === 'ArrowUp') {{
                     e.preventDefault();
                     openDrawer();
