@@ -126,7 +126,9 @@ def open_onboarding_modal(
             v_user_0, excluded_ids = seeder.seed_cold_start("content_first", selected_genres)
             st.session_state.persona_mode = "Content First"
             st.session_state.seed_params = {"selected_genres": selected_genres}
-            st.session_state.v_user = v_user_0
+            st.session_state.v_user_initial = v_user_0.copy()
+            st.session_state.swipe_history = []
+            st.session_state.watched_ids = []
             st.session_state.excluded_ids = excluded_ids
             st.session_state.swiped_titles = []
             st.session_state.liked_ids = []
@@ -239,6 +241,7 @@ def load_profile_from_browser(
 
         valid_ids = set(df["anime_id"].astype(int).tolist())
         id_to_title = dict(zip(df["anime_id"].astype(int), df["title"].astype(str)))
+        id_to_eps = dict(zip(df["anime_id"].astype(int), df["episodes"]))
 
         v_initial = np.zeros(expected_dim)
         v_rebuilt = v_initial.copy()
@@ -496,7 +499,8 @@ def revert_swiped_anime(
     max_per_studio: int,
     franchise_thresh: int,
     min_score: float,
-    quality_weight: float
+    quality_weight: float,
+    length_filter: str = "All Lengths"
 ):
     """
     Hoàn tác một bộ anime từ Liked, Passed hoặc Watched:
@@ -631,17 +635,6 @@ def main():
         min_score = st.slider("Minimum Rating Score", 5.0, 8.5, 7.2, 0.1)
         quality_weight = st.slider("Quality Boost Weight", 0.0, 0.6, 0.25, 0.05)
         st.divider()
-        st.subheader("⏱️ Episode Length Preference")
-        length_filter = st.selectbox(
-            "Format / Episode Cap:",
-            [
-                "All Lengths",
-                "Short (≤ 13 eps — 1 Cour)",
-                "Medium (≤ 26 eps — 1-2 Cours)",
-                "Exclude Long-Running (> 50 eps)"
-            ],
-            index=0
-        )
 
     space_res = build_multimodal_space(df)
     if len(space_res) == 5:
@@ -682,15 +675,12 @@ def main():
             st.session_state.persona_mode = "Eyecandy First (Default)"
 
     current_sidebar_params = (
-        mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight, length_filter
+        mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
     )
     prev_params = st.session_state.get("sidebar_params")
-    length_excluded = _get_length_excluded_ids(df, length_filter)
-
-    # Kiểm tra xem thẻ hiện tại (deck[0]) có vi phạm bộ lọc độ dài mới chọn hay không
-    active_card_invalid = bool(
-        st.session_state.get("deck") and st.session_state.deck[0] in length_excluded
-    )
+    if prev_params is not None and prev_params != current_sidebar_params:
+        st.session_state.deck = []
+    st.session_state.sidebar_params = current_sidebar_params
 
     if (
         prev_params is None
@@ -893,7 +883,7 @@ def main():
                             revert_swiped_anime(
                                 l_aid, "liked", df, V_i, id_to_idx, anime_lookup, anime_vectors,
                                 gamma, alpha, beta, mmr_lambda, max_per_studio,
-                                franchise_thresh, min_score, quality_weight
+                                franchise_thresh, min_score, quality_weight, length_filter
                             )
                             st.session_state.pending_ls_save = True
                             st.rerun()
@@ -918,7 +908,7 @@ def main():
                             revert_swiped_anime(
                                 w_aid, "watched", df, V_i, id_to_idx, anime_lookup, anime_vectors,
                                 gamma, alpha, beta, mmr_lambda, max_per_studio,
-                                franchise_thresh, min_score, quality_weight
+                                franchise_thresh, min_score, quality_weight, length_filter
                             )
                             st.session_state.pending_ls_save = True
                             st.rerun()
@@ -943,7 +933,7 @@ def main():
                             revert_swiped_anime(
                                 p_aid, "passed", df, V_i, id_to_idx, anime_lookup, anime_vectors,
                                 gamma, alpha, beta, mmr_lambda, max_per_studio,
-                                franchise_thresh, min_score, quality_weight
+                                franchise_thresh, min_score, quality_weight, length_filter
                             )
                             st.session_state.pending_ls_save = True
                             st.rerun()
