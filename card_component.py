@@ -8,21 +8,19 @@ import streamlit.components.v1 as components
 from data_loader import get_main_studio
 
 
-# Lấy link nhúng YouTube Trailer từ cột trailer_url trong CSV (không chặn luồng mạng)
 @st.cache_data(ttl=86400, show_spinner=False)
 def _extract_youtube_id(raw_url: str) -> str:
     val = str(raw_url or "").strip()
     if not val or val.lower() in ("nan", "none", "n/a"):
         return ""
-    # Trường hợp CSV lưu thẳng 11 ký tự YouTube ID
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", val):
         return val
-    # Trường hợp URL đầy đủ: watch?v=, embed/, youtu.be/, shorts/, youtube-nocookie.com
     match = re.search(
         r"(?:v=|/embed/|/v/|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})",
         val
     )
     return match.group(1) if match else ""
+
 
 def get_youtube_trailer_embed(title: str, raw_url: str) -> str:
     yt_id = _extract_youtube_id(raw_url)
@@ -31,54 +29,36 @@ def get_youtube_trailer_embed(title: str, raw_url: str) -> str:
     return f"https://www.youtube-nocookie.com/embed/{yt_id}?rel=0&modestbranding=1&playsinline=1"
 
 
-# Render thẻ anime bằng HTML/CSS/JS hỗ trợ kéo chuột/cảm ứng (Trái=Pass, Phải=Like, Lên=Trailer)
 def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explanation_text: str, pos_tags: list[str]):
     title = str(anime_row["title"])
+    safe_title = html.escape(title)
     img_url = str(anime_row["image_url"]).strip()
     if not img_url or img_url == "nan":
         img_url = "https://placehold.co/600x850/1e1b4b/f43f5e?text=AniMatch+Poster"
 
-    studio = get_main_studio(anime_row["studios"])
-    score = str(anime_row.get("score", "N/A"))
-    year = str(anime_row.get("year", "N/A"))
-    episodes = str(anime_row.get("episodes", "N/A"))
-    anime_type = str(anime_row.get("type", "TV"))
-    full_synopsis = str(anime_row["synopsis"]).replace('"', '&quot;').replace("'", "&#39;")
+    studio = html.escape(get_main_studio(anime_row["studios"]))
+    score = html.escape(str(anime_row.get("score", "N/A")))
+    year = html.escape(str(anime_row.get("year", "N/A")))
+    episodes = html.escape(str(anime_row.get("episodes", "N/A")))
+    anime_type = html.escape(str(anime_row.get("type", "TV")))
+
+    raw_syn = str(anime_row.get("synopsis", "")).strip() or "No synopsis available."
+    full_synopsis = html.escape(raw_syn)
     short_synopsis = full_synopsis if len(full_synopsis) <= 230 else full_synopsis[:227] + "..."
 
     genres_list = [g.strip() for g in re.split(r"[|,]", str(anime_row["genres"])) if g.strip()][:5]
-    genres_badges_html = "".join([f'<span class="genre-pill">{g}</span>' for g in genres_list])
+    genres_badges_html = "".join([f'<span class="genre-pill">{html.escape(g)}</span>' for g in genres_list])
 
     pos_tags_html = ""
     if pos_tags:
-        pos_tags_html = f'<div class="key-match">✨ <b>Matched Features:</b> {", ".join(pos_tags[:4])}</div>'
-
-    embed_url = get_youtube_trailer_embed(title, anime_row.get("trailer_url", ""))
-    yt_search_query = urllib.parse.quote(f"{title} official anime trailer")
-    yt_search_url = f"https://www.youtube.com/results?search_query={yt_search_query}"
-
-    if embed_url:
-        trailer_html = f"""
-        <div class="trailer-container">
-            <iframe src="{embed_url}" title="Anime Trailer" frameborder="0"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowfullscreen></iframe>
-        </div>
-        """
-    else:
-        trailer_html = f"""
-        <div class="no-trailer-box">
-            <div>🎬 Direct trailer embed unavailable for this title.</div>
-            <a href="{yt_search_url}" target="_blank" class="yt-btn">▶️ Watch Trailer on YouTube</a>
-        </div>
-        """
+        safe_tags = ", ".join(html.escape(t) for t in pos_tags[:4])
+        pos_tags_html = f'<div class="key-match">✨ <b>Matched Features:</b> {safe_tags}</div>'
 
     f_role = str(anime_row.get("franchise_role", "ENTRY")).upper()
     parent_title = html.escape(str(anime_row.get("parent_title", "")).strip())
-    cur_title = html.escape(str(anime_row.get("title", "")).strip())
 
     relation_badge_html = ""
-    if f_role in ("SEQUEL", "PREQUEL", "SPIN_OFF") and parent_title and parent_title.lower() != cur_title.lower():
+    if f_role in ("SEQUEL", "PREQUEL", "SPIN_OFF") and parent_title and parent_title.lower() != safe_title.lower():
         badge_styles = {
             "SEQUEL": ("⏩ SEQUEL OF", "rgba(245, 158, 11, 0.18)", "#fbbf24", "rgba(245, 158, 11, 0.45)"),
             "PREQUEL": ("⏪ PREQUEL TO", "rgba(56, 189, 248, 0.18)", "#38bdf8", "rgba(56, 189, 248, 0.45)"),
@@ -86,23 +66,23 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         }
         label_prefix, bg_col, txt_col, border_col = badge_styles[f_role]
         relation_badge_html = (
-            f'<div style="display:inline-block; margin: 4px 0 6px 0; padding: 3px 9px; '
-            f'border-radius: 6px; font-size: 11.5px; font-weight: 700; '
+            f'<div style="display:inline-block; margin: 2px 0 4px 0; padding: 3px 9px; '
+            f'border-radius: 6px; font-size: 11px; font-weight: 700; '
             f'background: {bg_col}; color: {txt_col}; border: 1px solid {border_col};">'
             f'{label_prefix}: {parent_title}</div>'
         )
 
     yt_id = _extract_youtube_id(anime_row.get("trailer_url", ""))
-    safe_query = urllib.parse.quote_plus(f"{anime_row.get('title', '')} official anime trailer")
+    safe_query = urllib.parse.quote_plus(f"{title} official anime trailer")
     yt_search_url = f"https://www.youtube.com/results?search_query={safe_query}"
 
     if yt_id:
         yt_watch_url = f"https://www.youtube.com/watch?v={yt_id}"
         trailer_block_html = f"""
-        <div style="position:relative; width:100%; padding-bottom:56.25%; border-radius:10px; overflow:hidden; background:#0b1120; border:1px solid rgba(148,163,184,0.2);">
+        <div class="trailer-container">
             <iframe
                 src="https://www.youtube-nocookie.com/embed/{yt_id}?rel=0&modestbranding=1&playsinline=1"
-                style="position:absolute; top:0; left:0; width:100%; height:100%; border:0;"
+                title="Anime Trailer"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                 allowfullscreen
                 loading="lazy">
@@ -117,10 +97,9 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         """
     else:
         trailer_block_html = f"""
-        <div style="border:1px dashed rgba(148,163,184,0.35); border-radius:10px; padding:16px; text-align:center; background:rgba(15,23,42,0.5);">
-            <div style="color:#cbd5e1; font-size:13px; margin-bottom:10px;">🎬 Direct trailer embed unavailable for this title.</div>
-            <a href="{yt_search_url}" target="_blank" rel="noopener noreferrer"
-               style="display:inline-block; background:#ef4444; color:#fff; font-weight:700; font-size:13px; padding:8px 16px; border-radius:999px; text-decoration:none;">
+        <div class="no-trailer-box">
+            <div>🎬 Direct trailer embed unavailable for this title.</div>
+            <a href="{yt_search_url}" target="_blank" rel="noopener noreferrer" class="yt-btn">
                ▶️ Watch Trailer on YouTube
             </a>
         </div>
@@ -150,13 +129,13 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         }}
         .hint-bar {{
             width: 100%;
-            max-width: 460px;
+            max-width: 420px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             gap: 8px;
             margin-bottom: 10px;
-            padding: 6px 10px;
+            padding: 6px 12px;
             border-radius: 10px;
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid rgba(255, 255, 255, 0.08);
@@ -192,17 +171,13 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             will-change: transform;
             display: flex;
             flex-direction: column;
-            <div class="hint-bar">
-                <span class="hint-left">⬅️ [←] PASS</span>
-                <span class="hint-up">⬆️ [↑] Trailer • ⬇️ [↓] Watched</span>
-                <span class="hint-right">LIKE [→] ➡️</span>
-            </div>;
         }}
         .tinder-card:active {{ cursor: grabbing; }}
         .poster-wrap {{
             position: relative;
             width: 100%;
-            height: 295px;
+            height: 280px;
+            flex-shrink: 0;
             overflow: hidden;
             background: #090d16;
         }}
@@ -215,7 +190,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         .poster-gradient {{
             position: absolute;
             bottom: 0; left: 0; right: 0;
-            height: 110px;
+            height: 105px;
             background: linear-gradient(to top, #0f172a 5%, transparent 100%);
         }}
         .sim-badge {{
@@ -280,19 +255,22 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         }}
         .stamp-watched {{
             top: 40px; left: 50%; transform: translateX(-50%);
-            color: #c084fc; border-color: #c084fc;
+            color: #c084fc; border: 4px solid #c084fc;
             background: rgba(192, 132, 252, 0.16);
+            font-size: 22px;
+            white-space: nowrap;
         }}
         .card-body {{
-            padding: 12px 18px 14px 18px;
+            padding: 10px 18px 14px 18px;
             display: flex;
             flex-direction: column;
-            gap: 7px;
+            gap: 6px;
             flex: 1;
             color: #f8fafc;
+            overflow: hidden;
         }}
         .title-row {{
-            font-size: 19px;
+            font-size: 18px;
             font-weight: 800;
             line-height: 1.2;
             color: #ffffff;
@@ -320,7 +298,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             font-size: 12px;
             line-height: 1.4;
             color: #cbd5e1;
-            max-height: 66px;
+            max-height: 64px;
             overflow: hidden;
         }}
         .explain-box {{
@@ -369,12 +347,14 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             align-items: center;
             border-bottom: 1px solid rgba(255,255,255,0.12);
             padding-bottom: 10px;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
+            flex-shrink: 0;
         }}
         .drawer-title {{
             font-size: 16px;
             font-weight: 800;
             color: #38bdf8;
+            padding-right: 8px;
         }}
         .close-btn {{
             background: rgba(244, 63, 94, 0.2);
@@ -385,6 +365,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             font-size: 12px;
             font-weight: 700;
             cursor: pointer;
+            flex-shrink: 0;
         }}
         .close-btn:hover {{
             background: rgba(244, 63, 94, 0.35);
@@ -397,12 +378,12 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             -webkit-user-select: text;
         }}
         .drawer-section-label {{
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 0.8px;
             color: #94a3b8;
-            margin: 10px 0 6px 0;
+            margin: 12px 0 6px 0;
         }}
         .trailer-container {{
             position: relative;
@@ -417,6 +398,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             position: absolute;
             top: 0; left: 0;
             width: 100%; height: 100%;
+            border: 0;
         }}
         .no-trailer-box {{
             background: rgba(30, 41, 59, 0.8);
@@ -424,7 +406,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             border-radius: 12px;
             padding: 14px;
             text-align: center;
-            font-size: 12px;
+            font-size: 12.5px;
             color: #cbd5e1;
         }}
         .yt-btn {{
@@ -433,21 +415,22 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             background: #ef4444;
             color: #ffffff;
             text-decoration: none;
-            padding: 6px 14px;
+            padding: 7px 15px;
             border-radius: 999px;
             font-weight: 700;
-            font-size: 12px;
+            font-size: 12.5px;
         }}
         .full-synopsis-text {{
             font-size: 13px;
             line-height: 1.55;
             color: #e2e8f0;
             white-space: pre-line;
+            padding-bottom: 12px;
         }}
     </style>
     </head>
     <body>
-       <div class="hint-bar">
+        <div class="hint-bar">
             <span class="hint-left">⬅️ [←] Pass</span>
             <span class="hint-center">
                 <span class="hint-up">⬆️ [↑] Trailer</span> • 
@@ -460,7 +443,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                 <div id="stampLike" class="stamp stamp-like">LIKE 💚</div>
                 <div id="stampPass" class="stamp stamp-pass">PASS ❌</div>
                 <div id="stampInfo" class="stamp stamp-info">INFO & TRAILER ⬆️</div>
-                <div class="stamp stamp-watched" id="stampWatched">ALREADY WATCHED</div>
+                <div id="stampWatched" class="stamp stamp-watched">ALREADY WATCHED</div>
 
                 <div class="poster-wrap">
                     <img src="{img_url}" alt="Poster" onerror="this.src='https://placehold.co/600x850/1e1b4b/f43f5e?text=Anime+Poster'"/>
@@ -470,13 +453,13 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                 </div>
 
                 <div class="card-body">
-                    <div class="title-row">{title}</div>
+                    <div class="title-row">{safe_title}</div>
                     {relation_badge_html}
                     <div class="sub-meta">🎬 Studio: {studio} &nbsp;•&nbsp; 📺 {episodes} eps</div>
                     <div class="genres-row">{genres_badges_html}</div>
                     <div class="synopsis">{short_synopsis}</div>
                     <div class="explain-box">
-                        💡 <b>Explainable AI:</b> {explanation_text}
+                        💡 <b>Explainable AI:</b> {html.escape(explanation_text)}
                         {pos_tags_html}
                     </div>
                     <div id="btnOpenDrawer" class="swipe-up-cue">⬆️ Drag card UP to watch Trailer & read Full Synopsis</div>
@@ -484,13 +467,15 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
 
                 <div id="detailDrawer" class="detail-drawer">
                     <div class="drawer-header">
-                        <div class="drawer-title">🎬 {title}</div>
+                        <div class="drawer-title">🎬 {safe_title}</div>
                         <button id="btnCloseDrawer" class="close-btn">⬇️ Close</button>
                     </div>
-                    <div style="font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 8px;">
-                        🎥 OFFICIAL TRAILER
+                    <div class="drawer-content">
+                        <div class="drawer-section-label" style="margin-top:0;">🎥 Official Trailer</div>
+                        {trailer_block_html}
+                        <div class="drawer-section-label">📖 Full Synopsis</div>
+                        <div class="full-synopsis-text">{full_synopsis}</div>
                     </div>
-                    {trailer_block_html}
                 </div>
             </div>
         </div>
@@ -498,12 +483,12 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         <script>
             const CURRENT_CARD_ID = "{int(anime_row['anime_id'])}";
             if (window.parent) {{
-                // Mở khóa khi server đã render sang thẻ mới
                 if (window.parent._animatchLastRenderedId !== CURRENT_CARD_ID) {{
                     window.parent._animatchLastRenderedId = CURRENT_CARD_ID;
                     window.parent._animatchBusy = false;
                 }}
             }}
+
             function hideBridgeButtons() {{
                 try {{
                     const buttons = window.parent.document.querySelectorAll('button');
@@ -574,6 +559,8 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
 
             function triggerStreamlitSwipe(direction) {{
                 if (window.parent && window.parent._animatchBusy) return;
+                if (window.parent) window.parent._animatchBusy = true;
+
                 let targetMarker = 'BRIDGE_SWIPE_PASS';
                 if (direction === 'right') targetMarker = 'BRIDGE_SWIPE_LIKE';
                 else if (direction === 'down') targetMarker = 'BRIDGE_SWIPE_WATCHED';
@@ -591,6 +578,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
 
             card.addEventListener('pointerdown', (e) => {{
                 if (isDrawerOpen || isAnimatingKeyboard) return;
+                if (window.parent && window.parent._animatchBusy) return;
                 isDragging = true;
                 startX = e.clientX;
                 startY = e.clientY;
@@ -682,6 +670,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                 const activeTag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
                 if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
                 if (isAnimatingKeyboard || isDragging) return;
+                if (window.parent && window.parent._animatchBusy) return;
 
                 if (isDrawerOpen) {{
                     if (e.key === 'Escape' || e.key === 'ArrowDown') {{
@@ -738,4 +727,4 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
     </body>
     </html>
     """
-    components.html(html_code, height=640, scrolling=False)
+    components.html(html_code, height=645, scrolling=False)
