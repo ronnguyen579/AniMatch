@@ -1,12 +1,9 @@
 import json
 import os
-import time
-import urllib.request
 import re
+import urllib.request
 import numpy as np
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 try:
     from rapidfuzz import fuzz
@@ -18,6 +15,47 @@ except ImportError:
         return SequenceMatcher(None, s1, s2).ratio() * 100.0
 
 JIKAN_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jikan_tv_movie_cache.csv")
+
+ANILIST_URL = "https://graphql.anilist.co"
+ANILIST_QUERY = """
+query ($page: Int, $perPage: Int,$formats: [MediaFormat]) {
+  Page(page: $page, perPage:$perPage) {
+    pageInfo {
+      hasNextPage
+    }
+    media(type: ANIME, format_in: $formats, sort: POPULARITY_DESC, isAdult: false) {
+      idMal
+      title {
+        english
+        romaji
+      }
+      format
+      episodes
+      seasonYear
+      averageScore
+      genres
+      tags {
+        name
+        rank
+      }
+      description(asHtml: false)
+      studios(isMain: true) {
+        nodes {
+          name
+        }
+      }
+      coverImage {
+        extraLarge
+        large
+      }
+      trailer {
+        id
+        site
+      }
+    }
+  }
+}
+"""
 
 SEQUEL_PATTERNS = re.compile(
     r"\b(second season|third season|fourth season|sequel to|continuation of|"
@@ -35,7 +73,6 @@ SPINOFF_PATTERNS = re.compile(
 )
 
 
-# Tạo DataFrame mẫu gồm 16 bộ anime nổi tiếng để chạy dự phòng khi không có file CSV
 def get_fallback_dataframe() -> pd.DataFrame:
     data = [
         {
@@ -170,7 +207,6 @@ def get_fallback_dataframe() -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-# Chuẩn hóa tên cột, xử lý giá trị thiếu (NaN) và loại bỏ dòng trùng ID từ file CSV
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "anime_id" not in df.columns and "mal_id" in df.columns:
@@ -191,7 +227,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in ["title", "genres", "synopsis"]:
         if col not in df.columns:
-            raise ValueError(f"CSV file is missing a required column: '{col}'")
+            raise ValueError(f"Dataset is missing a required column: '{col}'")
 
     for candidate_col in ["trailer_url", "trailer_embed_url", "trailer", "trailer_youtube_id"]:
         if candidate_col in df.columns:
@@ -231,12 +267,10 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# Chuyển dấu phân cách '|' và ',' thành khoảng trắng để bộ TF-IDF tách từ
 def clean_pipe_text(series: pd.Series) -> pd.Series:
     return series.astype(str).str.replace("|", " ", regex=False).str.replace(",", " ", regex=False)
 
 
-# Lấy tên studio đầu tiên (studio chính) từ chuỗi danh sách các studio
 def get_main_studio(studios_val) -> str:
     if pd.isna(studios_val) or not str(studios_val).strip():
         return "Unknown"
@@ -244,7 +278,6 @@ def get_main_studio(studios_val) -> str:
     return first_studio if first_studio else "Unknown"
 
 
-# Chuẩn hóa tên anime (xóa số phần/season/part) để phát hiện các phần cùng series
 def normalize_title(title: str) -> str:
     title = str(title).lower()
     patterns = [
@@ -258,7 +291,7 @@ def normalize_title(title: str) -> str:
     title = re.sub(r"[^a-z0-9\s]", " ", title)
     return " ".join(title.split())
 
-# Trích xuất số thứ tự phần (Season/Part) từ tên anime (mặc định phần đầu là 1)
+
 def extract_season_number(title: str) -> int:
     t = str(title).lower()
     if "final season" in t:
@@ -272,7 +305,6 @@ def extract_season_number(title: str) -> int:
     if match_ord:
         return int(match_ord.group(1))
 
-    # Các hậu tố số La Mã ở cuối tên (ví dụ: Mob Psycho 100 II, Overlord III)
     roman_map = {"ii": 2, "iii": 3, "iv": 4, "v": 5}
     match_roman = re.search(r"\b(ii|iii|iv|v)\s*$", t)
     if match_roman:
@@ -280,36 +312,28 @@ def extract_season_number(title: str) -> int:
 
     return 1
 
-# Lấy tên gốc chuẩn hóa của series (xóa cả số La Mã ở cuối để gom nhóm các phần)
+
 def get_franchise_root(title: str) -> str:
     base = normalize_title(title)
     base = re.sub(r"\b(ii|iii|iv|v|final)\s*$", "", base).strip()
     return base
 
-# Kiểm tra 2 bộ anime có thuộc cùng một franchise hay không
+
 def same_franchise(title_1: str, title_2: str, threshold: int = 90) -> bool:
     return calc_fuzz_ratio(normalize_title(title_1), normalize_title(title_2)) >= threshold
 
+
 def extract_proper_nouns(text: str) -> set:
-    """Trích xuất tên nhân vật/địa danh viết hoa (bỏ qua đầu câu) để nhận diện cùng vũ trụ."""
     words = re.findall(r"(?<!\. )\b[A-Z][a-z]{3,}\b", str(text))
     ignore = {"When", "After", "Before", "While", "During", "However", "Despite", "Their", "These", "Those", "With", "From", "Into", "Through"}
     return {w.lower() for w in words if w not in ignore}
 
 
 def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Phân loại mỗi anime thành:
-    - 'ENTRY': Phần mở đầu / phim độc lập (an toàn để gợi ý cho người mới)
-    - 'SEQUEL': Phần tiếp theo (tự động trỏ về entry_id nếu user chưa xem phần đầu)
-    - 'PREQUEL': Tiền truyện
-    - 'SPIN_OFF': Ngoại truyện / vũ trụ song song (có thể gợi ý độc lập hoặc gắn nhãn Spin-off)
-    """
     df = df.copy()
     df["num_year"] = pd.to_numeric(df["year"], errors="coerce").fillna(9999)
     df["is_tv"] = (df["type"].astype(str).str.upper() == "TV").astype(int)
 
-    # 1. Phân loại vai trò dựa trên Title & Synopsis
     roles = []
     for _, row in df.iterrows():
         title = str(row["title"])
@@ -327,7 +351,6 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
 
     df["franchise_role"] = roles
 
-    # 2. Gom nhóm Franchise bằng: Prefix trước dấu ':'/'/' + Trùng tên nhân vật chính + Cùng Studio
     df["prefix_root"] = (
         df["title"].astype(str)
         .str.split(r"[:;/\-–]").str[0]
@@ -336,7 +359,6 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
     df["proper_nouns"] = df["synopsis"].apply(extract_proper_nouns)
     df["main_studio"] = df["studios"].apply(get_main_studio)
 
-    # Tìm Entry Point (bản TV sớm nhất có role == 'ENTRY') cho mỗi prefix_root
     entry_candidates = df.sort_values(
         by=["is_tv", "num_year", "anime_id"],
         ascending=[False, True, True]
@@ -347,126 +369,24 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
         if len(p_root) >= 4 and p_root not in prefix_to_entry:
             prefix_to_entry[p_root] = int(row["anime_id"])
 
-    # 3. Xử lý các bộ đổi tên hoàn toàn (không trùng prefix, VD: Bakemonogatari vs Owarimonogatari)
-    # Dựa vào: Cùng Studio + Trùng >= 2 tên nhân vật riêng + Synopsis tương đồng cao
     entry_id_map = {}
     studio_groups = df.groupby("main_studio")
 
-    for idx, row in df.iterrows():
+    for _, row in df.iterrows():
         aid = int(row["anime_id"])
         p_root = row["prefix_root"]
         role = row["franchise_role"]
-
-        # Mặc định trỏ theo prefix_root nếu tìm thấy
         resolved_entry = prefix_to_entry.get(p_root, aid)
 
-        # Nếu vẫn là SEQUEL/PREQUEL nhưng tên đổi hoàn toàn (resolved_entry == aid), dò theo nhân vật + studio
         if role in ("SEQUEL", "PREQUEL") and resolved_entry == aid:
             studio = row["main_studio"]
             nouns_a = row["proper_nouns"]
             if studio and studio != "Unknown" and len(nouns_a) >= 2 and studio in studio_groups.groups:
                 peers = studio_groups.get_group(studio)
-                # Chỉ tìm các bản phát hành trước đó
                 earlier_peers = peers[peers["num_year"] <= row["num_year"]]
                 best_overlap = 1
                 for _, p_row in earlier_peers.iterrows():
                     p_aid = int(p_row["anime_id"])
                     if p_aid == aid:
                         continue
-                    overlap = len(nouns_a & p_row["proper_nouns"])
-                    if overlap > best_overlap:
-                        best_overlap = overlap
-                        resolved_entry = entry_id_map.get(p_aid, p_aid)
-
-        entry_id_map[aid] = resolved_entry
-
-    df["entry_anime_id"] = df["anime_id"].astype(int).map(entry_id_map)
-    id_to_title = dict(zip(df["anime_id"].astype(int), df["title"].astype(str)))
-    df["parent_title"] = df["entry_anime_id"].map(id_to_title).fillna("")
-    return df
-
-def fetch_jikan_catalog(pages_per_type: int = 8, force_refresh: bool = False) -> pd.DataFrame:
-    """
-    Kéo danh sách Top Anime từ Jikan API v4, chỉ lấy TV Series và Movie.
-    - pages_per_type=8 => 8 trang TV (200 bộ) + 8 trang Movie (200 bộ) = 400 bộ chất lượng nhất.
-    - Tự động lưu cache ra file cục bộ để các lần sau mở app không phải chờ API.
-    """
-    if not force_refresh and os.path.exists(JIKAN_CACHE_FILE):
-        try:
-            cached_df = pd.read_csv(JIKAN_CACHE_FILE)
-            if not cached_df.empty:
-                return normalize_dataframe(cached_df)
-        except Exception:
-            pass
-
-    records = []
-    seen_ids = set()
-
-    for anime_type in ("tv", "movie"):
-        for page in range(1, pages_per_type + 1):
-            url = (
-                f"https://api.jikan.moe/v4/top/anime"
-                f"?type={anime_type}&filter=bypopularity&sfw=true&limit=25&page={page}"
-            )
-            req = urllib.request.Request(url, headers={"User-Agent": "AniMatchApp/1.0"})
-            try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                items = payload.get("data", [])
-                if not items:
-                    break
-
-                for item in items:
-                    mal_id = int(item.get("mal_id", 0))
-                    if not mal_id or mal_id in seen_ids:
-                        continue
-                    seen_ids.add(mal_id)
-
-                    title = item.get("title_english") or item.get("title") or "Untitled Anime"
-                    genres = "|".join([g["name"] for g in item.get("genres", []) if g.get("name")])
-                    themes = "|".join([t["name"] for t in item.get("themes", []) if t.get("name")])
-                    studios = "|".join([s["name"] for s in item.get("studios", []) if s.get("name")]) or "Unknown"
-
-                    images = item.get("images", {}).get("jpg", {})
-                    image_url = images.get("large_image_url") or images.get("image_url") or ""
-
-                    trailer = item.get("trailer", {}) or {}
-                    trailer_url = trailer.get("embed_url") or trailer.get("url") or ""
-
-                    aired_from = (item.get("aired", {}) or {}).get("from") or ""
-                    year_val = item.get("year") or (aired_from[:4] if len(aired_from) >= 4 else "N/A")
-
-                    records.append({
-                        "anime_id": mal_id,
-                        "mal_id": mal_id,
-                        "title": title,
-                        "type": item.get("type") or anime_type.upper(),
-                        "genres": genres,
-                        "themes": themes,
-                        "synopsis": item.get("synopsis") or "",
-                        "studio": studios,
-                        "studios": studios,
-                        "score": item.get("score") if item.get("score") is not None else "N/A",
-                        "episodes": item.get("episodes") if item.get("episodes") is not None else (1 if anime_type == "movie" else "N/A"),
-                        "year": year_val,
-                        "image_url": image_url,
-                        "trailer_url": trailer_url,
-                    })
-
-                if not (payload.get("pagination", {}) or {}).get("has_next_page", False):
-                    break
-                time.sleep(0.42)  # Tuân thủ rate-limit 3 req/giây của Jikan API
-            except Exception:
-                time.sleep(1.0)
-                continue
-
-    if not records:
-        return normalize_dataframe(get_fallback_dataframe())
-
-    raw_df = pd.DataFrame(records)
-    try:
-        raw_df.to_csv(JIKAN_CACHE_FILE, index=False)
-    except Exception:
-        pass
-
-    return normalize_dataframe(raw_df)
+                    overlap = len(nouns_a & p_
