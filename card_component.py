@@ -433,6 +433,14 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         </div>
 
         <script>
+            const CURRENT_CARD_ID = "{int(anime_row['anime_id'])}";
+            if (window.parent) {{
+                // Mở khóa khi server đã render sang thẻ mới
+                if (window.parent._animatchLastRenderedId !== CURRENT_CARD_ID) {{
+                    window.parent._animatchLastRenderedId = CURRENT_CARD_ID;
+                    window.parent._animatchBusy = false;
+                }}
+            }}
             function hideBridgeButtons() {{
                 try {{
                     const buttons = window.parent.document.querySelectorAll('button');
@@ -502,6 +510,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             detailDrawer.addEventListener('pointerdown', (e) => e.stopPropagation());
 
             function triggerStreamlitSwipe(direction) {{
+                if (window.parent && window.parent._animatchBusy) return;
                 let targetMarker = 'BRIDGE_SWIPE_PASS';
                 if (direction === 'right') targetMarker = 'BRIDGE_SWIPE_LIKE';
                 else if (direction === 'down') targetMarker = 'BRIDGE_SWIPE_WATCHED';
