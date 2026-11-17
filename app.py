@@ -420,7 +420,7 @@ def process_swipe(
     max_per_studio: int,
     franchise_thresh: int,
     min_score: float = 7.2,
-    quality_weight: float = 0.25
+    quality_weight: float = 0.25,
     length_filter: str = "All Lengths"
 ):
     if not st.session_state.deck:
