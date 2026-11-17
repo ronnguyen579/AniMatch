@@ -189,15 +189,11 @@ def open_onboarding_modal(
 def init_session_state():
     defaults = {
         "onboarded": False,
-        "show_onboarding_modal": False,
-        "ls_checked": False,
-        "ls_wait_done": False,
-        "pending_ls_save": False,
-        "pending_ls_clear": False,
-        "reset_counter": 0,
+        "show_onboarding_modal": True,
         "persona_mode": "Not Selected",
-        "seed_params": {},
+        "v_user_initial": None,   # Lưu vector gốc lúc mới Onboarding
         "v_user": None,
+        "swipe_history": [],      # Lưu lịch sử [(anime_id, "like"|"pass"), ...]
         "excluded_ids": set(),
         "swiped_titles": [],
         "deck": [],
@@ -244,6 +240,7 @@ def process_swipe(
 
     st.session_state.excluded_ids.add(current_aid)
     st.session_state.swiped_titles.append(str(anime_row["title"]))
+    st.session_state.swipe_history.append((current_aid, action))
     st.session_state.swipe_count += 1
 
     if action == "like":
@@ -270,6 +267,76 @@ def process_swipe(
         V_i=V_i,
         id_to_idx=id_to_idx
     )
+    
+def revert_passed_anime(
+    target_aid: int,
+    df: pd.DataFrame,
+    V_i,
+    id_to_idx: dict,
+    anime_lookup: dict,
+    anime_vectors: dict,
+    gamma: float,
+    alpha: float,
+    beta: float,
+    mmr_lambda: float,
+    max_per_studio: int,
+    franchise_thresh: int,
+    min_score: float,
+    quality_weight: float
+):
+    """Hoàn tác một bộ anime đã Pass: xóa khỏi lịch sử, tính lại v_user chính xác và đưa thẻ lên đầu deck."""
+    if target_aid not in st.session_state.passed_ids:
+        return
+
+    # 1. Gỡ bỏ khỏi danh sách đã Pass, excluded_ids và swiped_titles
+    st.session_state.passed_ids = [aid for aid in st.session_state.passed_ids if aid != target_aid]
+    st.session_state.excluded_ids.discard(target_aid)
+
+    target_title = str(anime_lookup[target_aid]["title"])
+    if target_title in st.session_state.swiped_titles:
+        st.session_state.swiped_titles.remove(target_title)
+
+    # 2. Xóa thao tác này khỏi swipe_history và tái tạo lại v_user từ vector gốc
+    st.session_state.swipe_history = [
+        (aid, act) for (aid, act) in st.session_state.swipe_history if aid != target_aid
+    ]
+    st.session_state.swipe_count = len(st.session_state.swipe_history)
+
+    v_rebuilt = (
+        st.session_state.v_user_initial.copy()
+        if st.session_state.v_user_initial is not None
+        else np.zeros_like(st.session_state.v_user)
+    )
+    liked_so_far = 0
+    for aid, act in st.session_state.swipe_history:
+        eff_beta = (beta * 0.4) if liked_so_far == 0 else beta
+        v_rebuilt = update_user_vector_rocchio(
+            v_rebuilt, anime_vectors[aid], action=act, gamma=gamma, alpha=alpha, beta=eff_beta
+        )
+        if act == "like":
+            liked_so_far += 1
+
+    st.session_state.v_user = v_rebuilt
+
+    # 3. Tạo lại deck mới và đặt bộ anime vừa revert lên vị trí đầu tiên (#1) để user thao tác ngay
+    new_deck = generate_diverse_deck(
+        df=df,
+        anime_vectors=anime_vectors,
+        v_user=st.session_state.v_user,
+        excluded_ids=st.session_state.excluded_ids,
+        swiped_titles=st.session_state.swiped_titles,
+        deck_size=8,
+        mmr_lambda=mmr_lambda,
+        max_per_studio=max_per_studio,
+        franchise_threshold=franchise_thresh,
+        min_score=min_score,
+        quality_weight=quality_weight,
+        V_i=V_i,
+        id_to_idx=id_to_idx
+    )
+    new_deck = [aid for aid in new_deck if aid != target_aid]
+    st.session_state.deck = [target_aid] + new_deck[:7]
+    st.session_state.last_action_msg = f"↩️ REVERTED: **{target_title}** is back at the top of your deck!"
 
 
 # ==============================================================================
@@ -496,37 +563,70 @@ def main():
                 })
             st.dataframe(pd.DataFrame(upcoming_rows), use_container_width=True, hide_index=True)
 
-    with st.expander(f"💚 Liked Anime ({len(st.session_state.liked_ids)}) & ⚖️ Side-by-Side Compare View", expanded=False):
-        if st.session_state.liked_ids:
-            liked_df = df[df["anime_id"].isin(st.session_state.liked_ids)][
-                ["anime_id", "title", "type", "genres", "studio", "score", "episodes", "year"]
-            ]
-            st.dataframe(liked_df, use_container_width=True, hide_index=True)
-        else:
-            st.caption("No anime liked yet. Drag a card to the right to like it!")
+    with st.expander(
+        f"💚 Liked ({len(st.session_state.liked_ids)}) • ❌ Passed ({len(st.session_state.passed_ids)}) • ⚖️ Compare",
+        expanded=False
+    ):
+        tab_liked, tab_passed, tab_compare = st.tabs([
+            f"💚 Liked Watchlist ({len(st.session_state.liked_ids)})",
+            f"❌ Passed History & Revert ({len(st.session_state.passed_ids)})",
+            "⚖️ Side-by-Side Comparison"
+        ])
 
-        st.markdown("#### ⚖️ Side-by-Side Anime Comparison")
-        anime_label_map = {f"{row['title']} (ID: {row['mal_id']})": int(row["mal_id"]) for _, row in df.iterrows()}
-        labels_list = list(anime_label_map.keys())
-        if len(labels_list) >= 2:
-            s1, s2 = st.columns(2)
-            with s1:
-                c1 = st.selectbox("Select Anime A:", options=labels_list, index=0)
-            with s2:
-                options_b = [lbl for lbl in labels_list if lbl != c1]
-                c2 = st.selectbox("Select Anime B:", options=options_b, index=0)
+        with tab_liked:
+            if st.session_state.liked_ids:
+                liked_df = df[df["anime_id"].isin(st.session_state.liked_ids)][
+                    ["anime_id", "title", "type", "genres", "studio", "score", "episodes", "year"]
+                ]
+                st.dataframe(liked_df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No anime liked yet. Drag a card to the right to like it!")
 
-            comp = compare_anime(df, anime_label_map[c1], anime_label_map[c2])
-            comp_rows = []
-            for attr in ["Genres", "Themes", "Studio"]:
-                vals = comp[attr]
-                comp_rows.append({
-                    "Attribute": attr,
-                    "Common": ", ".join(vals["common"]) if vals["common"] else "—",
-                    f"Only in {comp['Title']['anime_a']}": ", ".join(vals["different_a"]) if vals["different_a"] else "—",
-                    f"Only in {comp['Title']['anime_b']}": ", ".join(vals["different_b"]) if vals["different_b"] else "—",
-                })
-            st.table(pd.DataFrame(comp_rows))
+        with tab_passed:
+            if st.session_state.passed_ids:
+                st.caption("Accidentally swiped left? Click **↩️ Revert** to restore the card to the top of your deck and undo its negative weight.")
+                # Hiển thị theo thứ tự mới Pass gần nhất lên trên cùng
+                for p_aid in reversed(st.session_state.passed_ids):
+                    p_row = anime_lookup[p_aid]
+                    c_info, c_btn = st.columns([4.2, 1])
+                    with c_info:
+                        st.markdown(
+                            f"**{p_row['title']}** &nbsp;•&nbsp; ⭐ {p_row['score']} &nbsp;•&nbsp; "
+                            f"🎬 {get_main_studio(p_row['studios'])} &nbsp;•&nbsp; `{p_row['genres']}`"
+                        )
+                    with c_btn:
+                        if st.button("↩️ Revert", key=f"revert_pass_{p_aid}", use_container_width=True):
+                            revert_passed_anime(
+                                p_aid, df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                gamma, alpha, beta, mmr_lambda, max_per_studio,
+                                franchise_thresh, min_score, quality_weight
+                            )
+                            st.rerun()
+            else:
+                st.caption("No passed anime yet.")
+
+        with tab_compare:
+            anime_label_map = {f"{row['title']} (ID: {row['mal_id']})": int(row["mal_id"]) for _, row in df.iterrows()}
+            labels_list = list(anime_label_map.keys())
+            if len(labels_list) >= 2:
+                s1, s2 = st.columns(2)
+                with s1:
+                    c1 = st.selectbox("Select Anime A:", options=labels_list, index=0)
+                with s2:
+                    options_b = [lbl for lbl in labels_list if lbl != c1]
+                    c2 = st.selectbox("Select Anime B:", options=options_b, index=0)
+
+                comp = compare_anime(df, anime_label_map[c1], anime_label_map[c2])
+                comp_rows = []
+                for attr in ["Genres", "Themes", "Studio"]:
+                    vals = comp[attr]
+                    comp_rows.append({
+                        "Attribute": attr,
+                        "Common": ", ".join(vals["common"]) if vals["common"] else "—",
+                        f"Only in {comp['Title']['anime_a']}": ", ".join(vals["different_a"]) if vals["different_a"] else "—",
+                        f"Only in {comp['Title']['anime_b']}": ", ".join(vals["different_b"]) if vals["different_b"] else "—",
+                    })
+                st.table(pd.DataFrame(comp_rows))
 
 
 if __name__ == "__main__":
