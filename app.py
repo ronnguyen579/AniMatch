@@ -351,6 +351,10 @@ def _get_length_excluded_ids(df: pd.DataFrame, length_filter: str) -> set:
     return set()
 
 
+def _get_all_excluded_ids(df: pd.DataFrame, length_filter: str) -> set:
+    return _get_effective_excluded_ids() | _get_length_excluded_ids(df, length_filter)
+
+
 def _tick_cooldowns():
     """Giảm 1 nhịp đếm ngược cooldown sau mỗi lần người dùng quẹt sang thẻ mới."""
     cd = st.session_state.get("cooldown_ids", {})
@@ -454,7 +458,7 @@ def process_swipe(
         df=df,
         anime_vectors=anime_vectors,
         v_user=st.session_state.v_user,
-        excluded_ids=_get_effective_excluded_ids(),
+        excluded_ids=_get_all_excluded_ids(df, length_filter),
         swiped_titles=st.session_state.swiped_titles,
         deck_size=8,
         mmr_lambda=mmr_lambda,
@@ -523,7 +527,7 @@ def revert_swiped_anime(
         df=df,
         anime_vectors=anime_vectors,
         v_user=st.session_state.v_user,
-        excluded_ids=_get_effective_excluded_ids() | ({active_aid} if active_aid is not None else set()),
+        excluded_ids=_get_all_excluded_ids(df, length_filter) | ({active_aid} if active_aid is not None else set()),
         swiped_titles=st.session_state.swiped_titles,
         deck_size=7 if active_aid is not None else 8,
         mmr_lambda=mmr_lambda,
@@ -655,12 +659,14 @@ def main():
         if st.session_state.get("persona_mode") == "Not Selected":
             st.session_state.persona_mode = "Eyecandy First (Default)"
 
-    current_sidebar_params = (mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight)
+    current_sidebar_params = (
+        mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight, length_filter
+    )
     prev_params = st.session_state.get("sidebar_params")
     if prev_params is not None and prev_params != current_sidebar_params:
         st.session_state.deck = generate_diverse_deck(
             df, anime_vectors, st.session_state.v_user,
-            _get_effective_excluded_ids(), st.session_state.swiped_titles, 8,
+            _get_all_excluded_ids(df, length_filter), st.session_state.swiped_titles, 8,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
             V_i=V_i, id_to_idx=id_to_idx
         )
