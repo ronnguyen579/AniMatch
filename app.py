@@ -686,7 +686,7 @@ def main():
     )
 
     st.subheader("⏱️ Episode Length Preference")
-        length_filter = st.selectbox(
+    length_filter = st.selectbox(
             "Format / Episode Cap:",
             [
                 "All Lengths",
