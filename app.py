@@ -27,6 +27,13 @@ from storage_manager import (
     try_restore_profile_from_browser,
 )
 
+from data_loader import (
+    get_fallback_dataframe,
+    normalize_dataframe,
+    get_main_studio,
+    fetch_jikan_catalog,
+)
+
 # ==============================================================================
 # CẤU HÌNH TRANG WEB (PAGE CONFIGURATION)
 # ==============================================================================
@@ -49,12 +56,11 @@ div.stButton > button p {
 # ==============================================================================
 # CACHE NẠP DỮ LIỆU & TỪ ĐIỂN TRA CỨU O(1)
 # ==============================================================================
-@st.cache_data(show_spinner=False)
-def load_and_prepare_catalog(csv_path: str | None):
-    if csv_path:
-        df = normalize_dataframe(pd.read_csv(csv_path))
-    else:
-        df = normalize_dataframe(get_fallback_dataframe())
+@st.cache_data(ttl=86400, show_spinner="Fetching TV & Movie catalog from Jikan API...")
+def load_and_prepare_catalog(pages_per_type: int = 8, force_refresh: bool = False):
+    df = fetch_jikan_catalog(pages_per_type=pages_per_type, force_refresh=force_refresh)
+    # Lọc cứng một lần nữa để chắc chắn chỉ giữ TV và Movie
+    df = df[df["type"].astype(str).str.upper().isin(["TV", "MOVIE"])].reset_index(drop=True)
 
     all_genres = sorted(list({
         g.strip()
@@ -578,31 +584,31 @@ def main():
             st.session_state.show_onboarding_modal = True
             st.rerun()
 
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    local_csv_files = sorted(glob.glob(os.path.join(current_dir, "*.csv")))
+    with st.sidebar:
+        st.subheader("🌐 Jikan Live Catalog")
+        pages_per_type = st.slider("Pages per Type (25 anime/page)", 2, 16, 8, 2)
+        if st.button("🔄 Refresh Jikan Catalog", use_container_width=True):
+            st.cache_data.clear()
+            fetch_jikan_catalog(pages_per_type=pages_per_type, force_refresh=True)
+            st.rerun()
 
-    if local_csv_files:
-        if len(local_csv_files) > 1:
-            selected_local_path = st.sidebar.selectbox(
-                "📁 Select Local CSV Dataset:",
-                options=local_csv_files,
-                format_func=lambda p: os.path.basename(p)
-            )
-        else:
-            selected_local_path = local_csv_files[0]
+        st.divider()
+        st.header("⚙️ Algorithm Parameters")
+        gamma = st.slider("Memory Decay (γ)", 0.90, 0.98, 0.95, 0.01)
+        alpha = st.slider("Like Attractor (α)", 0.05, 1.00, 0.30, 0.05)
+        beta = st.slider("Pass Repeller (β)", 0.05, 1.00, 0.15, 0.05)
+        mmr_lambda = st.slider("MMR Balance (λ)", 0.50, 1.00, 0.75, 0.05)
+        max_per_studio = st.number_input("Studio Cap (Max per Studio)", min_value=1, max_value=5, value=2)
+        franchise_thresh = st.slider("Franchise Deduplication Threshold", 75, 100, 90, 1)
+        st.divider()
+        st.subheader("⭐ Quality & Likeability Filter")
+        min_score = st.slider("Minimum Rating Score", 5.0, 8.5, 7.2, 0.1)
+        quality_weight = st.slider("Quality Boost Weight", 0.0, 0.6, 0.25, 0.05)
+        st.divider()
 
-        try:
-            df, all_genres, anime_lookup = load_and_prepare_catalog(selected_local_path)
-            file_name = os.path.basename(selected_local_path)
-            sig = f"local_{file_name}_{len(df)}"
-            data_source_label = f"Local CSV ({file_name})"
-        except Exception as e:
-            st.error(f"Error reading `{os.path.basename(selected_local_path)}`: {e}")
-            st.stop()
-    else:
-        df, all_genres, anime_lookup = load_and_prepare_catalog(None)
-        sig = f"default_{len(df)}"
-        data_source_label = "Built-in Sample Dataset"
+    df, all_genres, anime_lookup = load_and_prepare_catalog(pages_per_type=pages_per_type)
+    sig = f"jikan_tv_movie_{pages_per_type}_{len(df)}"
+    data_source_label = f"Jikan API v4 (TV & Movie • {len(df)} titles)"
 
     if st.session_state.get("dataset_signature", "") != sig:
         st.session_state.dataset_signature = sig
@@ -621,20 +627,6 @@ def main():
         st.session_state.last_action_msg = ""
         st.session_state.show_onboarding_modal = True
         st.session_state.ls_checked = False
-
-    with st.sidebar:
-        st.header("⚙️ Algorithm Parameters")
-        gamma = st.slider("Memory Decay (γ)", 0.90, 0.98, 0.95, 0.01)
-        alpha = st.slider("Like Attractor (α)", 0.05, 1.00, 0.30, 0.05)
-        beta = st.slider("Pass Repeller (β)", 0.05, 1.00, 0.15, 0.05)
-        mmr_lambda = st.slider("MMR Balance (λ)", 0.50, 1.00, 0.75, 0.05)
-        max_per_studio = st.number_input("Studio Cap (Max per Studio)", min_value=1, max_value=5, value=2)
-        franchise_thresh = st.slider("Franchise Deduplication Threshold", 75, 100, 90, 1)
-        st.divider()
-        st.subheader("⭐ Quality & Likeability Filter")
-        min_score = st.slider("Minimum Rating Score", 5.0, 8.5, 7.2, 0.1)
-        quality_weight = st.slider("Quality Boost Weight", 0.0, 0.6, 0.25, 0.05)
-        st.divider()
 
     space_res = build_multimodal_space(df)
     if len(space_res) == 5:
