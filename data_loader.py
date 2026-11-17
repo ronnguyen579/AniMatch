@@ -18,8 +18,8 @@ JIKAN_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jik
 
 ANILIST_URL = "https://graphql.anilist.co"
 ANILIST_QUERY = """
-query ($page: Int, $perPage: Int,$formats: [MediaFormat]) {
-  Page(page: $page, perPage:$perPage) {
+query ($page: Int, $perPage: Int, $formats: [MediaFormat]) {
+  Page(page: $page, perPage: $perPage) {
     pageInfo {
       hasNextPage
     }
@@ -389,4 +389,133 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
                     p_aid = int(p_row["anime_id"])
                     if p_aid == aid:
                         continue
-                    overlap = len(nouns_a & p_
+                    overlap = len(nouns_a & p_row["proper_nouns"])
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        resolved_entry = entry_id_map.get(p_aid, p_aid)
+
+        entry_id_map[aid] = resolved_entry
+
+    df["entry_anime_id"] = df["anime_id"].astype(int).map(entry_id_map)
+    id_to_title = dict(zip(df["anime_id"].astype(int), df["title"].astype(str)))
+    df["parent_title"] = df["entry_anime_id"].map(id_to_title).fillna("")
+    return df
+
+
+def fetch_jikan_catalog(pages_per_type: int = 4, force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Kéo danh sách TV & Movie siêu tốc qua AniList GraphQL (50 bộ/trang),
+    tự động map sang cấu trúc chuẩn MAL/AniMatch.
+    """
+    if not force_refresh and os.path.exists(JIKAN_CACHE_FILE):
+        try:
+            cached_df = pd.read_csv(JIKAN_CACHE_FILE)
+            if not cached_df.empty:
+                return normalize_dataframe(cached_df)
+        except Exception:
+            pass
+
+    total_pages = max(2, pages_per_type)
+    records = []
+    seen_ids = set()
+
+    for page in range(1, total_pages + 1):
+        payload = json.dumps({
+            "query": ANILIST_QUERY,
+            "variables": {
+                "page": page,
+                "perPage": 50,
+                "formats": ["TV", "MOVIE"]
+            }
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            ANILIST_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "AniMatchApp/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+            page_data = (data.get("data") or {}).get("Page") or {}
+            items = page_data.get("media") or []
+            if not items:
+                break
+
+            for item in items:
+                mal_id = item.get("idMal")
+                if not mal_id or int(mal_id) in seen_ids:
+                    continue
+                mal_id = int(mal_id)
+                seen_ids.add(mal_id)
+
+                t_obj = item.get("title") or {}
+                title = t_obj.get("english") or t_obj.get("romaji") or "Untitled Anime"
+                fmt = "Movie" if item.get("format") == "MOVIE" else "TV"
+
+                genres = "|".join(item.get("genres") or [])
+                themes = "|".join([
+                    tg["name"] for tg in (item.get("tags") or [])
+                    if tg.get("name") and (tg.get("rank") or 0) >= 60
+                ][:6])
+
+                studio_nodes = ((item.get("studios") or {}).get("nodes")) or []
+                studios = "|".join([s["name"] for s in studio_nodes if s.get("name")]) or "Unknown"
+
+                raw_desc = str(item.get("description") or "")
+                clean_syn = re.sub(r"<[^>]+>", " ", raw_desc).strip()
+
+                avg_sc = item.get("averageScore")
+                score_val = round(float(avg_sc) / 10.0, 2) if avg_sc else "N/A"
+
+                eps_val = item.get("episodes")
+                if eps_val is None:
+                    eps_val = 1 if fmt == "Movie" else "N/A"
+
+                cover = item.get("coverImage") or {}
+                image_url = cover.get("extraLarge") or cover.get("large") or ""
+
+                tr = item.get("trailer") or {}
+                trailer_url = (
+                    f"https://www.youtube.com/watch?v={tr['id']}"
+                    if tr.get("site") == "youtube" and tr.get("id")
+                    else ""
+                )
+
+                records.append({
+                    "anime_id": mal_id,
+                    "mal_id": mal_id,
+                    "title": title,
+                    "type": fmt,
+                    "genres": genres,
+                    "themes": themes,
+                    "synopsis": clean_syn,
+                    "studio": studios,
+                    "studios": studios,
+                    "score": score_val,
+                    "episodes": eps_val,
+                    "year": item.get("seasonYear") or "N/A",
+                    "image_url": image_url,
+                    "trailer_url": trailer_url,
+                })
+
+            if not (page_data.get("pageInfo") or {}).get("hasNextPage", False):
+                break
+        except Exception:
+            continue
+
+    if not records:
+        return normalize_dataframe(get_fallback_dataframe())
+
+    raw_df = pd.DataFrame(records)
+    try:
+        raw_df.to_csv(JIKAN_CACHE_FILE, index=False)
+    except Exception:
+        pass
+
+    return normalize_dataframe(raw_df)
