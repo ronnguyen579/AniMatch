@@ -2,7 +2,7 @@ import re
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import hstack, csr_matrix
 
@@ -17,6 +17,14 @@ from data_loader import (
 W_G = 2.5
 W_S = 0.8
 W_V = 0.35
+
+ANIME_GENERIC_WORDS = {
+    "world", "life", "city", "girl", "girls", "boy", "boys", "young", "story",
+    "new", "day", "days", "time", "year", "years", "make", "way", "people",
+    "human", "humans", "man", "woman", "one", "two", "however", "despite",
+    "begin", "begins", "find", "finds", "must", "becomes", "become"
+}
+CUSTOM_STOP_WORDS = list(ENGLISH_STOP_WORDS | ANIME_GENERIC_WORDS)
 
 
 class SparseVectorLookup:
@@ -40,7 +48,13 @@ def build_multimodal_space(df: pd.DataFrame):
     tfidf_studio = TfidfVectorizer()
 
     min_df_value = 4 if len(df) >= 4 else 1
-    tfidf_synopsis = TfidfVectorizer(stop_words="english", min_df=min_df_value, max_df=0.4)
+    tfidf_synopsis = TfidfVectorizer(
+        stop_words=CUSTOM_STOP_WORDS,
+        ngram_range=(1, 2),
+        min_df=min_df_value,
+        max_df=0.35,
+        max_features=3500
+    )
 
     combined_genres_themes = (
         clean_pipe_text(df["genres"]) + " " + clean_pipe_text(df["themes"])
@@ -51,7 +65,12 @@ def build_multimodal_space(df: pd.DataFrame):
     try:
         V_synopsis = tfidf_synopsis.fit_transform(df["synopsis"]) * W_S
     except ValueError:
-        tfidf_synopsis = TfidfVectorizer(stop_words="english", min_df=1)
+        tfidf_synopsis = TfidfVectorizer(
+            stop_words=CUSTOM_STOP_WORDS,
+            ngram_range=(1, 2),
+            min_df=1,
+            max_features=3500
+        )
         V_synopsis = tfidf_synopsis.fit_transform(df["synopsis"]) * W_S
 
     V_studio = tfidf_studio.fit_transform(cleaned_studio) * W_V
