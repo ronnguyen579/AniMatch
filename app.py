@@ -685,7 +685,19 @@ def main():
         mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight, length_filter
     )
     prev_params = st.session_state.get("sidebar_params")
-    if (prev_params is None or prev_params != current_sidebar_params or not st.session_state.get("deck")):
+    length_excluded = _get_length_excluded_ids(df, length_filter)
+
+    # Kiểm tra xem thẻ hiện tại (deck[0]) có vi phạm bộ lọc độ dài mới chọn hay không
+    active_card_invalid = bool(
+        st.session_state.get("deck") and st.session_state.deck[0] in length_excluded
+    )
+
+    if (
+        prev_params is None
+        or prev_params != current_sidebar_params
+        or not st.session_state.get("deck")
+        or active_card_invalid
+    ):
         st.session_state.deck = generate_diverse_deck(
             df, anime_vectors, st.session_state.v_user,
             _get_all_excluded_ids(df, length_filter), st.session_state.swiped_titles, 8,
