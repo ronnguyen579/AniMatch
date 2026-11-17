@@ -24,6 +24,12 @@ def _extract_youtube_id(raw_url: str) -> str:
     )
     return match.group(1) if match else ""
 
+def get_youtube_trailer_embed(title: str, raw_url: str) -> str:
+    yt_id = _extract_youtube_id(raw_url)
+    if not yt_id:
+        return ""
+    return f"https://www.youtube-nocookie.com/embed/{yt_id}?rel=0&modestbranding=1&playsinline=1"
+
 
 # Render thẻ anime bằng HTML/CSS/JS hỗ trợ kéo chuột/cảm ứng (Trái=Pass, Phải=Like, Lên=Trailer)
 def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explanation_text: str, pos_tags: list[str]):
