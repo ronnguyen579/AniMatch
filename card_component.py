@@ -85,17 +85,26 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             overflow: hidden;
         }}
         .hint-bar {{
+            width: 100%;
+            max-width: 460px;
             display: flex;
             justify-content: space-between;
-            width: 100%;
-            max-width: 405px;
-            margin-bottom: 8px;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+            padding: 6px 10px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
             font-size: 12px;
-            font-weight: 700;
+            font-weight: 600;
+            letter-spacing: 0.2px;
         }}
-        .hint-left {{ color: #f43f5e; }}
+        .hint-left {{ color: #fb7185; }}
+        .hint-center {{ color: #94a3b8; text-align: center; }}
         .hint-up {{ color: #38bdf8; }}
-        .hint-right {{ color: #10b981; }}
+        .hint-down {{ color: #c084fc; }}
+        .hint-right {{ color: #34d399; }}
         .arena {{
             position: relative;
             width: 100%;
@@ -374,10 +383,13 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
     </style>
     </head>
     <body>
-        <div class="hint-bar">
-            <span class="hint-left">⬅️ Drag LEFT: PASS</span>
-            <span class="hint-up">⬆️ Swipe UP: Trailer & Info</span>
-            <span class="hint-right">Drag RIGHT: LIKE ➡️</span>
+       <div class="hint-bar">
+            <span class="hint-left">⬅️ [←] Pass</span>
+            <span class="hint-center">
+                <span class="hint-up">⬆️ [↑] Trailer</span> • 
+                <span class="hint-down">⬇️ [↓] Watched</span>
+            </span>
+            <span class="hint-right">Like [→] ➡️</span>
         </div>
         <div class="arena">
             <div id="tinderCard" class="tinder-card">
