@@ -187,7 +187,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             raise ValueError(f"CSV file is missing a required column: '{col}'")
 
-   for candidate_col in ["trailer_url", "trailer_embed_url", "trailer", "trailer_youtube_id"]:
+    for candidate_col in ["trailer_url", "trailer_embed_url", "trailer", "trailer_youtube_id"]:
         if candidate_col in df.columns:
             df["trailer_url"] = df[candidate_col].fillna("").astype(str)
             break
