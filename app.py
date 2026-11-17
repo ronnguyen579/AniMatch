@@ -828,6 +828,16 @@ def main():
             if st.session_state.get("last_action_msg"):
                 st.info(st.session_state.last_action_msg)
 
+            f_role = str(current_anime.get("franchise_role", "ENTRY")).upper()
+            p_title = str(current_anime.get("parent_title", "")).strip()
+            if f_role in ("SEQUEL", "PREQUEL", "SPIN_OFF") and p_title and p_title.lower() != str(current_anime["title"]).lower():
+                role_label = {
+                    "SEQUEL": "⏩ Sequel of",
+                    "PREQUEL": "⏪ Prequel to",
+                    "SPIN_OFF": "🔀 Spin-off / Side Story of"
+                }[f_role]
+                st.warning(f"**Franchise Relation:** {role_label} **{p_title}**")
+
             st.write(f"**Recommendation Rationale:** *{exp_text}*")
             c_g, c_s, c_v = st.columns(3)
             for idx, feat in enumerate(["genres", "synopsis", "studio"]):
