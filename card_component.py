@@ -62,7 +62,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         </div>
         """
 
-    html_code = f"""
+    html_code = f"""<!-- card_id:{anime_row['anime_id']} -->
     <!DOCTYPE html>
     <html>
     <head>
