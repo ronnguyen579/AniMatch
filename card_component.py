@@ -9,21 +9,41 @@ from data_loader import get_main_studio
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _extract_youtube_id(raw_url: str) -> str:
-    val = str(raw_url or "").strip()
-    if not val or val.lower() in ("nan", "none", "n/a"):
-        return ""
-    if re.fullmatch(r"[A-Za-z0-9_-]{11}", val):
-        return val
-    match = re.search(
-        r"(?:v=|/embed/|/v/|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})",
-        val
+def fetch_first_youtube_video_id(anime_title: str) -> str:
+    """Tự động tìm trên YouTube theo tên anime và lấy videoId của kết quả đầu tiên."""
+    query = urllib.parse.quote_plus(f"{anime_title} official anime trailer PV")
+    search_url = f"https://www.youtube.com/results?search_query={query}"
+    req = urllib.request.Request(
+        search_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
     )
-    return match.group(1) if match else ""
+    try:
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            page_html = resp.read().decode("utf-8", errors="ignore")
+        # Lấy videoId đầu tiên xuất hiện trong kết quả tìm kiếm YouTube
+        match = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', page_html)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return ""
 
 
-def get_youtube_trailer_embed(title: str, raw_url: str) -> str:
-    yt_id = _extract_youtube_id(raw_url)
+def get_youtube_trailer_embed(title: str, raw_url: str = "") -> str:
+    # Ưu tiên lấy từ CSV nếu có sẵn, không có thì tự search YouTube lấy kết quả #1
+    val = str(raw_url or "").strip()
+    m = re.search(r"(?:v=|/embed/|/v/|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", val)
+    yt_id = m.group(1) if m else (val if re.fullmatch(r"[A-Za-z0-9_-]{11}", val) else "")
+
+    if not yt_id:
+        yt_id = fetch_first_youtube_video_id(title)
+
     if not yt_id:
         return ""
     return f"https://www.youtube-nocookie.com/embed/{yt_id}?rel=0&modestbranding=1&playsinline=1"
@@ -72,16 +92,17 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             f'{label_prefix}: {parent_title}</div>'
         )
 
-    yt_id = _extract_youtube_id(anime_row.get("trailer_url", ""))
+    embed_url = get_youtube_trailer_embed(title, anime_row.get("trailer_url", ""))
     safe_query = urllib.parse.quote_plus(f"{title} official anime trailer")
     yt_search_url = f"https://www.youtube.com/results?search_query={safe_query}"
 
-    if yt_id:
+    if embed_url:
+        yt_id = embed_url.split("/embed/")[1].split("?")[0]
         yt_watch_url = f"https://www.youtube.com/watch?v={yt_id}"
         trailer_block_html = f"""
         <div class="trailer-container">
             <iframe
-                src="https://www.youtube-nocookie.com/embed/{yt_id}?rel=0&modestbranding=1&playsinline=1"
+                src="{embed_url}"
                 title="Anime Trailer"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                 allowfullscreen
@@ -98,7 +119,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
     else:
         trailer_block_html = f"""
         <div class="no-trailer-box">
-            <div>🎬 Direct trailer embed unavailable for this title.</div>
+            <div>🎬 Could not auto-fetch trailer right now.</div>
             <a href="{yt_search_url}" target="_blank" rel="noopener noreferrer" class="yt-btn">
                ▶️ Watch Trailer on YouTube
             </a>
