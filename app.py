@@ -204,6 +204,7 @@ def save_profile_to_browser():
         "persona_mode": st.session_state.get("persona_mode", "Not Selected"),
         "liked_ids": [int(x) for x in st.session_state.get("liked_ids", [])],
         "passed_ids": [int(x) for x in st.session_state.get("passed_ids", [])],
+        "watched_ids": [int(x) for x in st.session_state.get("watched_ids", [])],
         "swipe_history": [[int(aid), str(act)] for aid, act in st.session_state.get("swipe_history", [])],
         "swipe_count": int(st.session_state.get("swipe_count", 0)),
     }
@@ -230,9 +231,10 @@ def load_profile_from_browser(
         data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
         liked_ids = [int(x) for x in data.get("liked_ids", [])]
         passed_ids = [int(x) for x in data.get("passed_ids", [])]
+        watched_ids = [int(x) for x in data.get("watched_ids", [])]
         saved_history = data.get("swipe_history", [])
 
-        if not liked_ids and not passed_ids:
+        if not liked_ids and not passed_ids and not watched_ids:
             return False
 
         valid_ids = set(df["anime_id"].astype(int).tolist())
@@ -245,25 +247,31 @@ def load_profile_from_browser(
         rebuilt_history = []
 
         if saved_history:
-            liked_so_far = 0
+            pos_so_far = 0
             for item in saved_history:
                 aid, act = int(item[0]), str(item[1])
                 if aid in valid_ids and aid in anime_vectors:
-                    eff_beta = (beta * 0.4) if liked_so_far == 0 else beta
+                    eff_beta = (beta * 0.4) if pos_so_far == 0 else beta
                     v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], act, gamma, alpha, eff_beta)
                     excluded.add(aid)
                     swiped_titles.append(id_to_title[aid])
                     rebuilt_history.append((aid, act))
-                    if act == "like":
-                        liked_so_far += 1
+                    if act in ("like", "watched"):
+                        pos_so_far += 1
         else:
             for aid in passed_ids:
                 if aid in valid_ids and aid in anime_vectors:
-                    eff_beta = (beta * 0.4) if not liked_ids else beta
+                    eff_beta = (beta * 0.4) if (not liked_ids and not watched_ids) else beta
                     v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], "pass", gamma, alpha, eff_beta)
                     excluded.add(aid)
                     swiped_titles.append(id_to_title[aid])
                     rebuilt_history.append((aid, "pass"))
+            for aid in watched_ids:
+                if aid in valid_ids and aid in anime_vectors:
+                    v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], "watched", gamma, alpha, beta)
+                    excluded.add(aid)
+                    swiped_titles.append(id_to_title[aid])
+                    rebuilt_history.append((aid, "watched"))
             for aid in liked_ids:
                 if aid in valid_ids and aid in anime_vectors:
                     v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], "like", gamma, alpha, beta)
@@ -277,6 +285,7 @@ def load_profile_from_browser(
         st.session_state.swipe_history = rebuilt_history
         st.session_state.liked_ids = [aid for aid in liked_ids if aid in valid_ids]
         st.session_state.passed_ids = [aid for aid in passed_ids if aid in valid_ids]
+        st.session_state.watched_ids = [aid for aid in watched_ids if aid in valid_ids]
         st.session_state.excluded_ids = excluded
         st.session_state.swiped_titles = swiped_titles
         st.session_state.swipe_count = len(rebuilt_history)
@@ -292,6 +301,7 @@ def clear_browser_profile():
         return
     set_local_storage(STORAGE_KEY, "")
 
+
 def init_session_state():
     defaults = {
         "onboarded": False,
@@ -301,10 +311,12 @@ def init_session_state():
         "v_user": None,
         "swipe_history": [],
         "excluded_ids": set(),
+        "cooldown_ids": {},       # {anime_id: swipes_remaining} -> khóa khỏi deck hiện tại sau khi Revert
         "swiped_titles": [],
         "deck": [],
         "liked_ids": [],
         "passed_ids": [],
+        "watched_ids": [],
         "swipe_count": 0,
         "last_action_msg": "",
         "dataset_signature": "",
@@ -318,13 +330,47 @@ def init_session_state():
             st.session_state[k] = v
 
 
+def _get_effective_excluded_ids() -> set:
+    """Gộp excluded_ids vĩnh viễn và các ID đang trong thời gian chờ (cooldown) sau khi Revert."""
+    base_excl = set(st.session_state.get("excluded_ids", set()))
+    cd = st.session_state.get("cooldown_ids", {})
+    return base_excl | set(cd.keys())
+
+
+def _tick_cooldowns():
+    """Giảm 1 nhịp đếm ngược cooldown sau mỗi lần người dùng quẹt sang thẻ mới."""
+    cd = st.session_state.get("cooldown_ids", {})
+    if not cd:
+        return
+    updated = {aid: rem - 1 for aid, rem in cd.items() if (rem - 1) > 0}
+    st.session_state.cooldown_ids = updated
+
+
+def _rebuild_user_vector_from_history(anime_vectors: dict, gamma: float, alpha: float, beta: float):
+    """Tái tạo lại vector v_user chuẩn xác 100% từ v_user_initial và swipe_history hiện tại."""
+    v_rebuilt = (
+        st.session_state.v_user_initial.copy()
+        if st.session_state.get("v_user_initial") is not None
+        else np.zeros_like(st.session_state.v_user)
+    )
+    pos_so_far = 0
+    for aid, act in st.session_state.get("swipe_history", []):
+        eff_beta = (beta * 0.4) if pos_so_far == 0 else beta
+        v_rebuilt = update_user_vector_rocchio(
+            v_rebuilt, anime_vectors[aid], action=act, gamma=gamma, alpha=alpha, beta=eff_beta
+        )
+        if act in ("like", "watched"):
+            pos_so_far += 1
+    st.session_state.v_user = v_rebuilt
+
+
 def process_swipe(
     action: str,
     df: pd.DataFrame,
     V_i,
     id_to_idx: dict,
     anime_lookup: dict,
-    anime_vectors,
+    anime_vectors: dict,
     gamma: float,
     alpha: float,
     beta: float,
@@ -341,7 +387,11 @@ def process_swipe(
     anime_row = anime_lookup[current_aid]
     v_anime = anime_vectors[current_aid]
 
-    effective_beta = (beta * 0.4) if len(st.session_state.liked_ids) == 0 else beta
+    # Giảm bộ đếm cooldown cho các bộ đã revert trước đó
+    _tick_cooldowns()
+
+    has_positive = (len(st.session_state.liked_ids) + len(st.session_state.watched_ids)) > 0
+    effective_beta = (beta * 0.4) if not has_positive else beta
 
     st.session_state.v_user = update_user_vector_rocchio(
         st.session_state.v_user, v_anime, action=action, gamma=gamma, alpha=alpha, beta=effective_beta
@@ -355,17 +405,18 @@ def process_swipe(
     if action == "like":
         st.session_state.liked_ids.append(current_aid)
         st.session_state.last_action_msg = f"💚 LIKED: **{anime_row['title']}**"
+    elif action == "watched":
+        st.session_state.watched_ids.append(current_aid)
+        st.session_state.last_action_msg = f"👁️ ALREADY WATCHED (+Taste Boost): **{anime_row['title']}**"
     else:
         st.session_state.passed_ids.append(current_aid)
         st.session_state.last_action_msg = f"❌ PASSED: **{anime_row['title']}**"
-
-    st.session_state.pending_ls_save = True
 
     st.session_state.deck = generate_diverse_deck(
         df=df,
         anime_vectors=anime_vectors,
         v_user=st.session_state.v_user,
-        excluded_ids=st.session_state.excluded_ids,
+        excluded_ids=_get_effective_excluded_ids(),
         swiped_titles=st.session_state.swiped_titles,
         deck_size=8,
         mmr_lambda=mmr_lambda,
@@ -376,9 +427,11 @@ def process_swipe(
         V_i=V_i,
         id_to_idx=id_to_idx
     )
-    
-def revert_passed_anime(
+
+
+def revert_swiped_anime(
     target_aid: int,
+    source_list: str,
     df: pd.DataFrame,
     V_i,
     id_to_idx: dict,
@@ -393,48 +446,48 @@ def revert_passed_anime(
     min_score: float,
     quality_weight: float
 ):
-    """Hoàn tác một bộ anime đã Pass: xóa khỏi lịch sử, tính lại v_user chính xác và đưa thẻ lên đầu deck."""
-    if target_aid not in st.session_state.passed_ids:
-        return
+    """
+    Hoàn tác một bộ anime từ Liked, Passed hoặc Watched:
+    - Xóa khỏi lịch sử & tính lại vector v_user công bằng.
+    - KHÔNG nhét lên đầu deck hiện tại; đưa vào cooldown (8 lượt quẹt) để sau đó
+      tự tái xuất hiện ngẫu nhiên/cạnh tranh sòng phẳng bằng MMR.
+    """
+    if source_list == "liked":
+        st.session_state.liked_ids = [aid for aid in st.session_state.liked_ids if aid != target_aid]
+    elif source_list == "watched":
+        st.session_state.watched_ids = [aid for aid in st.session_state.watched_ids if aid != target_aid]
+    else:
+        st.session_state.passed_ids = [aid for aid in st.session_state.passed_ids if aid != target_aid]
 
-    # 1. Gỡ bỏ khỏi danh sách đã Pass, excluded_ids và swiped_titles
-    st.session_state.passed_ids = [aid for aid in st.session_state.passed_ids if aid != target_aid]
     st.session_state.excluded_ids.discard(target_aid)
 
     target_title = str(anime_lookup[target_aid]["title"])
     if target_title in st.session_state.swiped_titles:
         st.session_state.swiped_titles.remove(target_title)
 
-    # 2. Xóa thao tác này khỏi swipe_history và tái tạo lại v_user từ vector gốc
     st.session_state.swipe_history = [
         (aid, act) for (aid, act) in st.session_state.swipe_history if aid != target_aid
     ]
     st.session_state.swipe_count = len(st.session_state.swipe_history)
 
-    v_rebuilt = (
-        st.session_state.v_user_initial.copy()
-        if st.session_state.v_user_initial is not None
-        else np.zeros_like(st.session_state.v_user)
-    )
-    liked_so_far = 0
-    for aid, act in st.session_state.swipe_history:
-        eff_beta = (beta * 0.4) if liked_so_far == 0 else beta
-        v_rebuilt = update_user_vector_rocchio(
-            v_rebuilt, anime_vectors[aid], action=act, gamma=gamma, alpha=alpha, beta=eff_beta
-        )
-        if act == "like":
-            liked_so_far += 1
+    # Tái tạo lại vector người dùng chính xác
+    _rebuild_user_vector_from_history(anime_vectors, gamma, alpha, beta)
 
-    st.session_state.v_user = v_rebuilt
+    # Đặt cooldown = 8 lượt quẹt để bộ này chắc chắn KHÔNG xuất hiện trong deck 8 lá hiện tại,
+    # nhưng sẽ tự động quay trở lại kho ứng viên và xuất hiện lại vào một lúc nào đó sau này.
+    cd = st.session_state.get("cooldown_ids", {})
+    cd[target_aid] = 8
+    st.session_state.cooldown_ids = cd
 
-    # 3. Tạo lại deck mới và đặt bộ anime vừa revert lên vị trí đầu tiên (#1) để user thao tác ngay
-    new_deck = generate_diverse_deck(
+    # Giữ nguyên thẻ đang hiển thị trên màn hình (deck[0]) nếu còn, chỉ tính lại phần đuôi phía sau
+    active_aid = st.session_state.deck[0] if st.session_state.deck else None
+    refreshed_tail = generate_diverse_deck(
         df=df,
         anime_vectors=anime_vectors,
         v_user=st.session_state.v_user,
-        excluded_ids=st.session_state.excluded_ids,
+        excluded_ids=_get_effective_excluded_ids() | ({active_aid} if active_aid is not None else set()),
         swiped_titles=st.session_state.swiped_titles,
-        deck_size=8,
+        deck_size=7 if active_aid is not None else 8,
         mmr_lambda=mmr_lambda,
         max_per_studio=max_per_studio,
         franchise_threshold=franchise_thresh,
@@ -443,18 +496,15 @@ def revert_passed_anime(
         V_i=V_i,
         id_to_idx=id_to_idx
     )
-    new_deck = [aid for aid in new_deck if aid != target_aid]
-    st.session_state.deck = [target_aid] + new_deck[:7]
-    st.session_state.last_action_msg = f"↩️ REVERTED: **{target_title}** is back at the top of your deck!"
+    st.session_state.deck = ([active_aid] + refreshed_tail) if active_aid is not None else refreshed_tail
+    st.session_state.last_action_msg = (
+        f"↩️ REVERTED **{target_title}**: Weights undone! It will reappear naturally later (not in the current deck)."
+    )
 
 
-# ==============================================================================
-# HÀM ĐIỀU PHỐI ỨNG DỤNG CHÍNH (MAIN APPLICATION)
-# ==============================================================================
 def main():
     init_session_state()
 
-    # 1. Xử lý đồng bộ localStorage (Clear / Save / Load an toàn bằng .get)
     if st.session_state.get("pending_ls_clear", False):
         clear_browser_profile()
         st.session_state.pending_ls_clear = False
@@ -463,7 +513,6 @@ def main():
         save_profile_to_browser()
         st.session_state.pending_ls_save = False
 
-    # 2. Thanh tiêu đề & nút đổi Persona / Reset
     top_c1, top_c2 = st.columns([3.5, 1.5])
     with top_c1:
         st.markdown("## 🔥 AniMatch")
@@ -473,7 +522,6 @@ def main():
             st.session_state.show_onboarding_modal = True
             st.rerun()
 
-    # 3. Tự động nạp CSV cục bộ hoặc dữ liệu mẫu dự phòng (đã cache)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     local_csv_files = sorted(glob.glob(os.path.join(current_dir, "*.csv")))
 
@@ -500,7 +548,6 @@ def main():
         sig = f"default_{len(df)}"
         data_source_label = "Built-in Sample Dataset"
 
-    # Reset state khi đổi sang dataset khác
     if st.session_state.get("dataset_signature", "") != sig:
         st.session_state.dataset_signature = sig
         st.session_state.onboarded = False
@@ -508,16 +555,17 @@ def main():
         st.session_state.v_user = None
         st.session_state.swipe_history = []
         st.session_state.excluded_ids = set()
+        st.session_state.cooldown_ids = {}
         st.session_state.swiped_titles = []
         st.session_state.deck = []
         st.session_state.liked_ids = []
         st.session_state.passed_ids = []
+        st.session_state.watched_ids = []
         st.session_state.swipe_count = 0
         st.session_state.last_action_msg = ""
         st.session_state.show_onboarding_modal = True
         st.session_state.ls_checked = False
 
-    # 4. Thanh tham số thuật toán ở Sidebar
     with st.sidebar:
         st.header("⚙️ Algorithm Parameters")
         gamma = st.slider("Memory Decay (γ)", 0.90, 0.98, 0.95, 0.01)
@@ -531,7 +579,6 @@ def main():
         min_score = st.slider("Minimum Rating Score", 5.0, 8.5, 7.2, 0.1)
         quality_weight = st.slider("Quality Boost Weight", 0.0, 0.6, 0.25, 0.05)
 
-    # 5. Xây dựng không gian vector đa phương thức (hỗ trợ cả trả về 4 hoặc 5 biến)
     space_res = build_multimodal_space(df)
     if len(space_res) == 5:
         V_i, id_to_idx, anime_vectors, vectorizers, dims = space_res
@@ -541,7 +588,6 @@ def main():
 
     expected_dim = V_i.shape[1]
 
-    # 6. Khôi phục dữ liệu từ localStorage trình duyệt (chạy 1 lần khi mở/F5 trang)
     if not st.session_state.get("ls_checked", False):
         st.session_state.ls_checked = True
         restored = load_profile_from_browser(
@@ -556,13 +602,12 @@ def main():
         if restored:
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, st.session_state.v_user,
-                st.session_state.excluded_ids, st.session_state.swiped_titles, 8,
+                _get_effective_excluded_ids(), st.session_state.swiped_titles, 8,
                 mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
                 V_i=V_i, id_to_idx=id_to_idx
             )
             st.toast("🔄 Restored your previous swipe session from browser storage!")
 
-    # 7. Khởi tạo vector mặc định nếu chưa có
     if st.session_state.get("v_user") is None or st.session_state.v_user.shape[0] != expected_dim:
         seeder = ContextualPriorSeeder(anime_vectors, vectorizers["genres"], W_G, dims["synopsis"], dims["studio"])
         v_user_0, excluded_ids = seeder.seed_cold_start("eyecandy_first", [])
@@ -570,45 +615,56 @@ def main():
         st.session_state.v_user = v_user_0
         st.session_state.excluded_ids = excluded_ids
         st.session_state.deck = generate_diverse_deck(
-            df, anime_vectors, v_user_0, excluded_ids, [], 8,
+            df, anime_vectors, v_user_0, _get_effective_excluded_ids(), [], 8,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
             V_i=V_i, id_to_idx=id_to_idx
         )
 
-    # 8. Tự động làm mới deck ngay lập tức nếu người dùng thay đổi thanh trượt Sidebar
     current_sidebar_params = (mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight)
     prev_params = st.session_state.get("sidebar_params")
     if prev_params is not None and prev_params != current_sidebar_params:
         st.session_state.deck = generate_diverse_deck(
             df, anime_vectors, st.session_state.v_user,
-            st.session_state.excluded_ids, st.session_state.swiped_titles, 8,
+            _get_effective_excluded_ids(), st.session_state.swiped_titles, 8,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
             V_i=V_i, id_to_idx=id_to_idx
         )
     st.session_state.sidebar_params = current_sidebar_params
 
-    # 9. Mở cửa sổ Onboarding nếu cần
     if st.session_state.get("show_onboarding_modal", False):
         open_onboarding_modal(
             df, V_i, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
             mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
         )
 
-    # 10. Thanh trạng thái tổng quan
+    liked_ids = st.session_state.get("liked_ids", [])
+    passed_ids = st.session_state.get("passed_ids", [])
+    watched_ids = st.session_state.get("watched_ids", [])
+
     st.caption(
         f"Source: **{data_source_label}** • "
         f"Persona: **{st.session_state.get('persona_mode', 'Not Selected')}** • "
         f"Catalog: **{len(df)} anime** • "
         f"Swiped: **{st.session_state.get('swipe_count', 0)}** • "
-        f"Liked: **{len(st.session_state.get('liked_ids', []))}**"
+        f"Liked: **{len(liked_ids)}** • "
+        f"Watched: **{len(watched_ids)}**"
     )
 
     if st.session_state.get("last_action_msg"):
         st.toast(st.session_state.last_action_msg)
 
-    # 11. Khu vực chính: Thẻ quẹt Tinder & Bảng phân tích vector thời gian thực
+    # Nếu deck hiện tại cạn nhưng vẫn còn thẻ đang trong cooldown -> mở khóa cooldown ngay để user tiếp tục
+    if not st.session_state.get("deck") and st.session_state.get("cooldown_ids"):
+        st.session_state.cooldown_ids = {}
+        st.session_state.deck = generate_diverse_deck(
+            df, anime_vectors, st.session_state.v_user,
+            _get_effective_excluded_ids(), st.session_state.swiped_titles, 8,
+            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+            V_i=V_i, id_to_idx=id_to_idx
+        )
+
     if not st.session_state.get("deck"):
-        st.warning("🎉 You have swiped through all available anime in the current filter! Click **Change Persona / Reset**, revert a passed anime below, or lower the Minimum Rating Score in the sidebar.")
+        st.warning("🎉 You have swiped through all available anime in the current filter! Click **Change Persona / Reset**, revert an anime below, or lower the Minimum Rating Score in the sidebar.")
     else:
         current_aid = st.session_state.deck[0]
         current_anime = anime_lookup[current_aid]
@@ -652,6 +708,13 @@ def main():
                 )
                 st.session_state.pending_ls_save = True
                 st.rerun()
+            if st.button("BRIDGE_SWIPE_WATCHED", key="btn_bridge_watched"):
+                process_swipe(
+                    "watched", df, V_i, id_to_idx, anime_lookup, anime_vectors, gamma, alpha, beta,
+                    mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight
+                )
+                st.session_state.pending_ls_save = True
+                st.rerun()
 
         with col_side:
             st.markdown("### 🧠 Real-Time Vector & Deck Queue")
@@ -683,32 +746,71 @@ def main():
                 })
             st.dataframe(pd.DataFrame(upcoming_rows), use_container_width=True, hide_index=True)
 
-    # 12. Khu vực quản lý Liked Watchlist, Passed History (Revert) & Compare View
-    liked_ids = st.session_state.get("liked_ids", [])
-    passed_ids = st.session_state.get("passed_ids", [])
-
+    # Khu vực quản lý toàn diện: Liked (có Revert) • Passed (có Revert) • Watched (có Revert) • Compare
     with st.expander(
-        f"💚 Liked ({len(liked_ids)}) • ❌ Passed ({len(passed_ids)}) • ⚖️ Compare",
+        f"💚 Liked ({len(liked_ids)}) • 👁️ Watched ({len(watched_ids)}) • ❌ Passed ({len(passed_ids)}) • ⚖️ Compare",
         expanded=False
     ):
-        tab_liked, tab_passed, tab_compare = st.tabs([
+        tab_liked, tab_watched, tab_passed, tab_compare = st.tabs([
             f"💚 Liked Watchlist ({len(liked_ids)})",
-            f"❌ Passed History & Revert ({len(passed_ids)})",
+            f"👁️ Already Watched ({len(watched_ids)})",
+            f"❌ Passed History ({len(passed_ids)})",
             "⚖️ Side-by-Side Comparison"
         ])
 
         with tab_liked:
             if liked_ids:
-                liked_df = df[df["anime_id"].isin(liked_ids)][
-                    ["anime_id", "title", "type", "genres", "studio", "score", "episodes", "year"]
-                ]
-                st.dataframe(liked_df, use_container_width=True, hide_index=True)
+                st.caption("Your saved watchlist. Click **↩️ Revert** to remove an item, undo its weight, and let it re-enter the pool naturally later.")
+                for l_aid in reversed(liked_ids):
+                    if l_aid not in anime_lookup:
+                        continue
+                    l_row = anime_lookup[l_aid]
+                    c_info, c_btn = st.columns([4.2, 1])
+                    with c_info:
+                        st.markdown(
+                            f"**{l_row['title']}** &nbsp;•&nbsp; ⭐ {l_row['score']} &nbsp;•&nbsp; "
+                            f"🎬 {get_main_studio(l_row['studios'])} &nbsp;•&nbsp; `{l_row['genres']}`"
+                        )
+                    with c_btn:
+                        if st.button("↩️ Revert", key=f"revert_like_{l_aid}", use_container_width=True):
+                            revert_swiped_anime(
+                                l_aid, "liked", df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                gamma, alpha, beta, mmr_lambda, max_per_studio,
+                                franchise_thresh, min_score, quality_weight
+                            )
+                            st.session_state.pending_ls_save = True
+                            st.rerun()
             else:
-                st.caption("No anime liked yet. Drag a card to the right to like it!")
+                st.caption("No anime liked yet. Drag a card right (or press `→`) to add to your watchlist!")
+
+        with tab_watched:
+            if watched_ids:
+                st.caption("Anime you swiped down (`↓`) as already watched — these boost your taste profile without cluttering your watchlist.")
+                for w_aid in reversed(watched_ids):
+                    if w_aid not in anime_lookup:
+                        continue
+                    w_row = anime_lookup[w_aid]
+                    c_info, c_btn = st.columns([4.2, 1])
+                    with c_info:
+                        st.markdown(
+                            f"**{w_row['title']}** &nbsp;•&nbsp; ⭐ {w_row['score']} &nbsp;•&nbsp; "
+                            f"🎬 {get_main_studio(w_row['studios'])} &nbsp;•&nbsp; `{w_row['genres']}`"
+                        )
+                    with c_btn:
+                        if st.button("↩️ Revert", key=f"revert_watched_{w_aid}", use_container_width=True):
+                            revert_swiped_anime(
+                                w_aid, "watched", df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                gamma, alpha, beta, mmr_lambda, max_per_studio,
+                                franchise_thresh, min_score, quality_weight
+                            )
+                            st.session_state.pending_ls_save = True
+                            st.rerun()
+            else:
+                st.caption("No watched anime logged yet. Swipe down (or press `↓`) when you see an anime you've already finished!")
 
         with tab_passed:
             if passed_ids:
-                st.caption("Accidentally swiped left? Click **↩️ Revert** to restore the card to the top of your deck and undo its negative weight.")
+                st.caption("Accidentally swiped left? Click **↩️ Revert** to undo its negative weight — it will return naturally after 8 swipes.")
                 for p_aid in reversed(passed_ids):
                     if p_aid not in anime_lookup:
                         continue
@@ -721,8 +823,8 @@ def main():
                         )
                     with c_btn:
                         if st.button("↩️ Revert", key=f"revert_pass_{p_aid}", use_container_width=True):
-                            revert_passed_anime(
-                                p_aid, df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                            revert_swiped_anime(
+                                p_aid, "passed", df, V_i, id_to_idx, anime_lookup, anime_vectors,
                                 gamma, alpha, beta, mmr_lambda, max_per_studio,
                                 franchise_thresh, min_score, quality_weight
                             )
@@ -753,7 +855,6 @@ def main():
                         f"Only in {comp['Title']['anime_b']}": ", ".join(vals["different_b"]) if vals["different_b"] else "—",
                     })
                 st.table(pd.DataFrame(comp_rows))
-
 
 if __name__ == "__main__":
     main()
