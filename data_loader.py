@@ -230,6 +230,33 @@ def normalize_title(title: str) -> str:
     title = re.sub(r"[^a-z0-9\s]", " ", title)
     return " ".join(title.split())
 
+# Trích xuất số thứ tự phần (Season/Part) từ tên anime (mặc định phần đầu là 1)
+def extract_season_number(title: str) -> int:
+    t = str(title).lower()
+    if "final season" in t:
+        return 99
+
+    match_num = re.search(r"\b(?:season|part)\s*(\d+)\b", t)
+    if match_num:
+        return int(match_num.group(1))
+
+    match_ord = re.search(r"\b(\d+)(?:st|nd|rd|th)\s+season\b", t)
+    if match_ord:
+        return int(match_ord.group(1))
+
+    # Các hậu tố số La Mã ở cuối tên (ví dụ: Mob Psycho 100 II, Overlord III)
+    roman_map = {"ii": 2, "iii": 3, "iv": 4, "v": 5}
+    match_roman = re.search(r"\b(ii|iii|iv|v)\s*$", t)
+    if match_roman:
+        return roman_map[match_roman.group(1)]
+
+    return 1
+
+# Lấy tên gốc chuẩn hóa của series (xóa cả số La Mã ở cuối để gom nhóm các phần)
+def get_franchise_root(title: str) -> str:
+    base = normalize_title(title)
+    base = re.sub(r"\b(ii|iii|iv|v|final)\s*$", "", base).strip()
+    return base
 
 # Kiểm tra 2 bộ anime có thuộc cùng một franchise hay không
 def same_franchise(title_1: str, title_2: str, threshold: int = 90) -> bool:
