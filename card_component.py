@@ -62,6 +62,25 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
         </div>
         """
 
+    f_role = str(anime_row.get("franchise_role", "ENTRY")).upper()
+    parent_title = html.escape(str(anime_row.get("parent_title", "")).strip())
+    cur_title = html.escape(str(anime_row.get("title", "")).strip())
+
+    relation_badge_html = ""
+    if f_role in ("SEQUEL", "PREQUEL", "SPIN_OFF") and parent_title and parent_title.lower() != cur_title.lower():
+        badge_styles = {
+            "SEQUEL": ("⏩ SEQUEL OF", "rgba(245, 158, 11, 0.18)", "#fbbf24", "rgba(245, 158, 11, 0.45)"),
+            "PREQUEL": ("⏪ PREQUEL TO", "rgba(56, 189, 248, 0.18)", "#38bdf8", "rgba(56, 189, 248, 0.45)"),
+            "SPIN_OFF": ("🔀 SPIN-OFF OF", "rgba(192, 132, 252, 0.18)", "#c084fc", "rgba(192, 132, 252, 0.45)"),
+        }
+        label_prefix, bg_col, txt_col, border_col = badge_styles[f_role]
+        relation_badge_html = (
+            f'<div style="display:inline-block; margin: 4px 0 6px 0; padding: 3px 9px; '
+            f'border-radius: 6px; font-size: 11.5px; font-weight: 700; '
+            f'background: {bg_col}; color: {txt_col}; border: 1px solid {border_col};">'
+            f'{label_prefix}: {parent_title}</div>'
+        )
+
     html_code = f"""<!-- card_id:{anime_row['anime_id']} -->
     <!DOCTYPE html>
     <html>
@@ -407,6 +426,7 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
 
                 <div class="card-body">
                     <div class="title-row">{title}</div>
+                    {relation_badge_html}
                     <div class="sub-meta">🎬 Studio: {studio} &nbsp;•&nbsp; 📺 {episodes} eps</div>
                     <div class="genres-row">{genres_badges_html}</div>
                     <div class="synopsis">{short_synopsis}</div>
