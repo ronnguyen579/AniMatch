@@ -217,6 +217,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["visual_tags_full"] = df["visual_tags_full"].fillna("").astype(str)
 
     df = df.drop_duplicates(subset=["anime_id"]).reset_index(drop=True)
+    df = enrich_franchise_metadata(df)
     return df
 
 
