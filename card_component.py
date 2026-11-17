@@ -1,6 +1,7 @@
 import html
 import re
 import urllib.parse
+import urllib.request
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -33,6 +34,36 @@ def fetch_first_youtube_video_id(anime_title: str) -> str:
     except Exception:
         pass
     return ""
+
+def fetch_streaming_links(mal_id: int, title: str) -> list[dict]:
+    """Lấy danh sách nền tảng xem bản quyền chính thức từ Jikan API (MyAnimeList)."""
+    results = []
+    if mal_id and int(mal_id) > 0:
+        url = f"https://api.jikan.moe/v4/anime/{int(mal_id)}/streaming"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "AniMatchApp/1.0"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                for item in payload.get("data", []):
+                    name = str(item.get("name", "")).strip()
+                    link = str(item.get("url", "")).strip()
+                    if name and link:
+                        results.append({"name": name, "url": link})
+        except Exception:
+            pass
+
+    # Nếu API không trả về (hoặc bị rate-limit), cung cấp link tìm kiếm trực tiếp trên các nền tảng phổ biến
+    if not results:
+        q = urllib.parse.quote_plus(title)
+        results = [
+            {"name": "Crunchyroll", "url": f"https://www.crunchyroll.com/search?q={q}"},
+            {"name": "Netflix", "url": f"https://www.netflix.com/search?q={q}"},
+            {"name": "Bilibili", "url": f"https://www.bilibili.tv/en/search-result?q={q}"},
+        ]
+    return results
 
 
 def get_youtube_trailer_embed(title: str, raw_url: str = "") -> str:
@@ -125,6 +156,37 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             </a>
         </div>
         """
+
+    mal_id = int(anime_row.get("mal_id", anime_row.get("anime_id", 0)) or 0)
+    streaming_list = fetch_streaming_links(mal_id, title)
+
+    platform_colors = {
+        "netflix": ("#e50914", "rgba(229, 9, 20, 0.16)"),
+        "crunchyroll": ("#f47521", "rgba(244, 117, 33, 0.16)"),
+        "bilibili": ("#00a1d6", "rgba(0, 161, 214, 0.16)"),
+        "muse": ("#fbbf24", "rgba(251, 191, 36, 0.16)"),
+        "ani-one": ("#34d399", "rgba(52, 211, 153, 0.16)"),
+        "disney": ("#38bdf8", "rgba(56, 189, 248, 0.16)"),
+        "prime": ("#60a5fa", "rgba(96, 165, 250, 0.16)"),
+    }
+
+    stream_pills = []
+    for item in streaming_list[:6]:
+        p_name = item["name"]
+        p_url = html.escape(item["url"])
+        txt_col, bg_col = "#e2e8f0", "rgba(148, 163, 184, 0.16)"
+        for key, (c_txt, c_bg) in platform_colors.items():
+            if key in p_name.lower():
+                txt_col, bg_col = c_txt, c_bg
+                break
+        stream_pills.append(
+            f'<a href="{p_url}" target="_blank" rel="noopener noreferrer" '
+            f'style="display:inline-flex; align-items:center; gap:4px; padding:5px 11px; '
+            f'border-radius:999px; font-size:11.5px; font-weight:700; text-decoration:none; '
+            f'color:{txt_col}; background:{bg_col}; border:1px solid {txt_col}55;">'
+            f'📺 {html.escape(p_name)}</a>'
+        )
+    streaming_html = f'<div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:4px;">{"".join(stream_pills)}</div>'
 
     html_code = f"""<!-- card_id:{anime_row['anime_id']} -->
     <!DOCTYPE html>
@@ -494,6 +556,8 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                     <div class="drawer-content">
                         <div class="drawer-section-label" style="margin-top:0;">🎥 Official Trailer</div>
                         {trailer_block_html}
+                        <div class="drawer-section-label">🍿 Where to Watch (Official)</div>
+                        {streaming_html}
                         <div class="drawer-section-label">📖 Full Synopsis</div>
                         <div class="full-synopsis-text">{full_synopsis}</div>
                     </div>
