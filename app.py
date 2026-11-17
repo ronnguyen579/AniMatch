@@ -1,6 +1,7 @@
 import os
 import glob
 import re
+import json
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -186,6 +187,110 @@ def open_onboarding_modal(
 # ==============================================================================
 # QUẢN LÝ TRẠNG THÁI PHIÊN & XỬ LÝ HÀNH ĐỘNG QUẸT
 # ==============================================================================
+try:
+    from streamlit_js_eval import get_local_storage, set_local_storage
+    HAS_JS_EVAL = True
+except ImportError:
+    HAS_JS_EVAL = False
+
+STORAGE_KEY = "animatch_user_profile_v1"
+
+
+def save_profile_to_browser():
+    if not HAS_JS_EVAL:
+        return
+    payload = {
+        "persona_mode": st.session_state.get("persona_mode", "Not Selected"),
+        "liked_ids": [int(x) for x in st.session_state.get("liked_ids", [])],
+        "passed_ids": [int(x) for x in st.session_state.get("passed_ids", [])],
+        "swipe_history": [[int(aid), str(act)] for aid, act in st.session_state.get("swipe_history", [])],
+        "swipe_count": int(st.session_state.get("swipe_count", 0)),
+    }
+    set_local_storage(STORAGE_KEY, json.dumps(payload))
+
+
+def load_profile_from_browser(
+    df: pd.DataFrame,
+    anime_vectors: dict,
+    expected_dim: int,
+    update_fn,
+    gamma: float = 0.95,
+    alpha: float = 0.30,
+    beta: float = 0.15
+) -> bool:
+    if not HAS_JS_EVAL:
+        return False
+
+    raw_data = get_local_storage(STORAGE_KEY)
+    if not raw_data:
+        return False
+
+    try:
+        data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+        liked_ids = [int(x) for x in data.get("liked_ids", [])]
+        passed_ids = [int(x) for x in data.get("passed_ids", [])]
+        saved_history = data.get("swipe_history", [])
+
+        if not liked_ids and not passed_ids:
+            return False
+
+        valid_ids = set(df["anime_id"].astype(int).tolist())
+        id_to_title = dict(zip(df["anime_id"].astype(int), df["title"].astype(str)))
+
+        v_initial = np.zeros(expected_dim)
+        v_rebuilt = v_initial.copy()
+        excluded = set()
+        swiped_titles = []
+        rebuilt_history = []
+
+        if saved_history:
+            liked_so_far = 0
+            for item in saved_history:
+                aid, act = int(item[0]), str(item[1])
+                if aid in valid_ids and aid in anime_vectors:
+                    eff_beta = (beta * 0.4) if liked_so_far == 0 else beta
+                    v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], act, gamma, alpha, eff_beta)
+                    excluded.add(aid)
+                    swiped_titles.append(id_to_title[aid])
+                    rebuilt_history.append((aid, act))
+                    if act == "like":
+                        liked_so_far += 1
+        else:
+            for aid in passed_ids:
+                if aid in valid_ids and aid in anime_vectors:
+                    eff_beta = (beta * 0.4) if not liked_ids else beta
+                    v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], "pass", gamma, alpha, eff_beta)
+                    excluded.add(aid)
+                    swiped_titles.append(id_to_title[aid])
+                    rebuilt_history.append((aid, "pass"))
+            for aid in liked_ids:
+                if aid in valid_ids and aid in anime_vectors:
+                    v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], "like", gamma, alpha, beta)
+                    excluded.add(aid)
+                    swiped_titles.append(id_to_title[aid])
+                    rebuilt_history.append((aid, "like"))
+
+        st.session_state.persona_mode = data.get("persona_mode", "Restored Session")
+        st.session_state.v_user_initial = v_initial
+        st.session_state.v_user = v_rebuilt
+        st.session_state.swipe_history = rebuilt_history
+        st.session_state.liked_ids = [aid for aid in liked_ids if aid in valid_ids]
+        st.session_state.passed_ids = [aid for aid in passed_ids if aid in valid_ids]
+        st.session_state.excluded_ids = excluded
+        st.session_state.swiped_titles = swiped_titles
+        st.session_state.swipe_count = len(rebuilt_history)
+        st.session_state.onboarded = True
+        st.session_state.show_onboarding_modal = False
+        return True
+    except Exception:
+        return False
+
+
+def clear_browser_profile():
+    if not HAS_JS_EVAL:
+        return
+    set_local_storage(STORAGE_KEY, "")
+
 def init_session_state():
     defaults = {
         "onboarded": False,
