@@ -10,15 +10,19 @@ from data_loader import get_main_studio
 
 # Lấy link nhúng YouTube Trailer từ cột trailer_url trong CSV (không chặn luồng mạng)
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_youtube_trailer_embed(title: str, csv_url: str = "") -> str:
-    url = str(csv_url).strip()
-    if url and url.lower() != "nan":
-        if "youtube.com/embed/" in url:
-            return url
-        match_v = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
-        if match_v:
-            return f"https://www.youtube.com/embed/{match_v.group(1)}?rel=0"
-    return ""
+def _extract_youtube_id(raw_url: str) -> str:
+    val = str(raw_url or "").strip()
+    if not val or val.lower() in ("nan", "none", "n/a"):
+        return ""
+    # Trường hợp CSV lưu thẳng 11 ký tự YouTube ID
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", val):
+        return val
+    # Trường hợp URL đầy đủ: watch?v=, embed/, youtu.be/, shorts/, youtube-nocookie.com
+    match = re.search(
+        r"(?:v=|/embed/|/v/|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})",
+        val
+    )
+    return match.group(1) if match else ""
 
 
 # Render thẻ anime bằng HTML/CSS/JS hỗ trợ kéo chuột/cảm ứng (Trái=Pass, Phải=Like, Lên=Trailer)
@@ -81,6 +85,40 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
             f'background: {bg_col}; color: {txt_col}; border: 1px solid {border_col};">'
             f'{label_prefix}: {parent_title}</div>'
         )
+
+    yt_id = _extract_youtube_id(anime_row.get("trailer_url", ""))
+    safe_query = urllib.parse.quote_plus(f"{anime_row.get('title', '')} official anime trailer")
+    yt_search_url = f"https://www.youtube.com/results?search_query={safe_query}"
+
+    if yt_id:
+        yt_watch_url = f"https://www.youtube.com/watch?v={yt_id}"
+        trailer_block_html = f"""
+        <div style="position:relative; width:100%; padding-bottom:56.25%; border-radius:10px; overflow:hidden; background:#0b1120; border:1px solid rgba(148,163,184,0.2);">
+            <iframe
+                src="https://www.youtube-nocookie.com/embed/{yt_id}?rel=0&modestbranding=1&playsinline=1"
+                style="position:absolute; top:0; left:0; width:100%; height:100%; border:0;"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowfullscreen
+                loading="lazy">
+            </iframe>
+        </div>
+        <div style="text-align:right; margin-top:6px;">
+            <a href="{yt_watch_url}" target="_blank" rel="noopener noreferrer"
+               style="font-size:11.5px; color:#94a3b8; text-decoration:none;">
+               ↗ Open directly on YouTube
+            </a>
+        </div>
+        """
+    else:
+        trailer_block_html = f"""
+        <div style="border:1px dashed rgba(148,163,184,0.35); border-radius:10px; padding:16px; text-align:center; background:rgba(15,23,42,0.5);">
+            <div style="color:#cbd5e1; font-size:13px; margin-bottom:10px;">🎬 Direct trailer embed unavailable for this title.</div>
+            <a href="{yt_search_url}" target="_blank" rel="noopener noreferrer"
+               style="display:inline-block; background:#ef4444; color:#fff; font-weight:700; font-size:13px; padding:8px 16px; border-radius:999px; text-decoration:none;">
+               ▶️ Watch Trailer on YouTube
+            </a>
+        </div>
+        """
 
     html_code = f"""<!-- card_id:{anime_row['anime_id']} -->
     <!DOCTYPE html>
@@ -443,12 +481,10 @@ def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explana
                         <div class="drawer-title">🎬 {title}</div>
                         <button id="btnCloseDrawer" class="close-btn">⬇️ Close</button>
                     </div>
-                    <div class="drawer-content">
-                        <div class="drawer-section-label">🎥 Official Trailer</div>
-                        {trailer_html}
-                        <div class="drawer-section-label">📖 Full Synopsis</div>
-                        <div class="full-synopsis-text">{full_synopsis}</div>
+                    <div style="font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 8px;">
+                        🎥 OFFICIAL TRAILER
                     </div>
+                    {trailer_block_html}
                 </div>
             </div>
         </div>
