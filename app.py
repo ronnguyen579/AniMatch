@@ -620,6 +620,18 @@ def main():
         st.subheader("⭐ Quality & Likeability Filter")
         min_score = st.slider("Minimum Rating Score", 5.0, 8.5, 7.2, 0.1)
         quality_weight = st.slider("Quality Boost Weight", 0.0, 0.6, 0.25, 0.05)
+        st.divider()
+        st.subheader("⏱️ Episode Length Preference")
+        length_filter = st.selectbox(
+            "Format / Episode Cap:",
+            [
+                "All Lengths",
+                "Short (≤ 13 eps — 1 Cour)",
+                "Medium (≤ 26 eps — 1-2 Cours)",
+                "Exclude Long-Running (> 50 eps)"
+            ],
+            index=0
+        )
 
     space_res = build_multimodal_space(df)
     if len(space_res) == 5:
