@@ -1,3 +1,7 @@
+import json
+import os
+import time
+import urllib.request
 import re
 import numpy as np
 import pandas as pd
@@ -12,6 +16,8 @@ except ImportError:
     from difflib import SequenceMatcher
     def calc_fuzz_ratio(s1: str, s2: str) -> float:
         return SequenceMatcher(None, s1, s2).ratio() * 100.0
+
+JIKAN_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jikan_tv_movie_cache.csv")
 
 SEQUEL_PATTERNS = re.compile(
     r"\b(second season|third season|fourth season|sequel to|continuation of|"
@@ -378,3 +384,89 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
     id_to_title = dict(zip(df["anime_id"].astype(int), df["title"].astype(str)))
     df["parent_title"] = df["entry_anime_id"].map(id_to_title).fillna("")
     return df
+
+def fetch_jikan_catalog(pages_per_type: int = 8, force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Kéo danh sách Top Anime từ Jikan API v4, chỉ lấy TV Series và Movie.
+    - pages_per_type=8 => 8 trang TV (200 bộ) + 8 trang Movie (200 bộ) = 400 bộ chất lượng nhất.
+    - Tự động lưu cache ra file cục bộ để các lần sau mở app không phải chờ API.
+    """
+    if not force_refresh and os.path.exists(JIKAN_CACHE_FILE):
+        try:
+            cached_df = pd.read_csv(JIKAN_CACHE_FILE)
+            if not cached_df.empty:
+                return normalize_dataframe(cached_df)
+        except Exception:
+            pass
+
+    records = []
+    seen_ids = set()
+
+    for anime_type in ("tv", "movie"):
+        for page in range(1, pages_per_type + 1):
+            url = (
+                f"https://api.jikan.moe/v4/top/anime"
+                f"?type={anime_type}&filter=bypopularity&sfw=true&limit=25&page={page}"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "AniMatchApp/1.0"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                items = payload.get("data", [])
+                if not items:
+                    break
+
+                for item in items:
+                    mal_id = int(item.get("mal_id", 0))
+                    if not mal_id or mal_id in seen_ids:
+                        continue
+                    seen_ids.add(mal_id)
+
+                    title = item.get("title_english") or item.get("title") or "Untitled Anime"
+                    genres = "|".join([g["name"] for g in item.get("genres", []) if g.get("name")])
+                    themes = "|".join([t["name"] for t in item.get("themes", []) if t.get("name")])
+                    studios = "|".join([s["name"] for s in item.get("studios", []) if s.get("name")]) or "Unknown"
+
+                    images = item.get("images", {}).get("jpg", {})
+                    image_url = images.get("large_image_url") or images.get("image_url") or ""
+
+                    trailer = item.get("trailer", {}) or {}
+                    trailer_url = trailer.get("embed_url") or trailer.get("url") or ""
+
+                    aired_from = (item.get("aired", {}) or {}).get("from") or ""
+                    year_val = item.get("year") or (aired_from[:4] if len(aired_from) >= 4 else "N/A")
+
+                    records.append({
+                        "anime_id": mal_id,
+                        "mal_id": mal_id,
+                        "title": title,
+                        "type": item.get("type") or anime_type.upper(),
+                        "genres": genres,
+                        "themes": themes,
+                        "synopsis": item.get("synopsis") or "",
+                        "studio": studios,
+                        "studios": studios,
+                        "score": item.get("score") if item.get("score") is not None else "N/A",
+                        "episodes": item.get("episodes") if item.get("episodes") is not None else (1 if anime_type == "movie" else "N/A"),
+                        "year": year_val,
+                        "image_url": image_url,
+                        "trailer_url": trailer_url,
+                    })
+
+                if not (payload.get("pagination", {}) or {}).get("has_next_page", False):
+                    break
+                time.sleep(0.42)  # Tuân thủ rate-limit 3 req/giây của Jikan API
+            except Exception:
+                time.sleep(1.0)
+                continue
+
+    if not records:
+        return normalize_dataframe(get_fallback_dataframe())
+
+    raw_df = pd.DataFrame(records)
+    try:
+        raw_df.to_csv(JIKAN_CACHE_FILE, index=False)
+    except Exception:
+        pass
+
+    return normalize_dataframe(raw_df)
