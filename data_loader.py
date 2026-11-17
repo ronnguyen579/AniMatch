@@ -1,6 +1,8 @@
 import re
 import numpy as np
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 try:
     from rapidfuzz import fuzz
@@ -10,6 +12,21 @@ except ImportError:
     from difflib import SequenceMatcher
     def calc_fuzz_ratio(s1: str, s2: str) -> float:
         return SequenceMatcher(None, s1, s2).ratio() * 100.0
+
+SEQUEL_PATTERNS = re.compile(
+    r"\b(second season|third season|fourth season|sequel to|continuation of|"
+    r"following the events of|resumes after|direct sequel)\b",
+    re.IGNORECASE
+)
+PREQUEL_PATTERNS = re.compile(
+    r"\b(prequel to|takes place before|set prior to|origin story of)\b",
+    re.IGNORECASE
+)
+SPINOFF_PATTERNS = re.compile(
+    r"\b(spin-?off|side story|parallel world|alternate setting|alternative retelling|"
+    r"same universe as|gaiden)\b",
+    re.IGNORECASE
+)
 
 
 # Tạo DataFrame mẫu gồm 16 bộ anime nổi tiếng để chạy dự phòng khi không có file CSV
@@ -261,3 +278,96 @@ def get_franchise_root(title: str) -> str:
 # Kiểm tra 2 bộ anime có thuộc cùng một franchise hay không
 def same_franchise(title_1: str, title_2: str, threshold: int = 90) -> bool:
     return calc_fuzz_ratio(normalize_title(title_1), normalize_title(title_2)) >= threshold
+
+def extract_proper_nouns(text: str) -> set:
+    """Trích xuất tên nhân vật/địa danh viết hoa (bỏ qua đầu câu) để nhận diện cùng vũ trụ."""
+    words = re.findall(r"(?<!\. )\b[A-Z][a-z]{3,}\b", str(text))
+    ignore = {"When", "After", "Before", "While", "During", "However", "Despite", "Their", "These", "Those", "With", "From", "Into", "Through"}
+    return {w.lower() for w in words if w not in ignore}
+
+
+def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Phân loại mỗi anime thành:
+    - 'ENTRY': Phần mở đầu / phim độc lập (an toàn để gợi ý cho người mới)
+    - 'SEQUEL': Phần tiếp theo (tự động trỏ về entry_id nếu user chưa xem phần đầu)
+    - 'PREQUEL': Tiền truyện
+    - 'SPIN_OFF': Ngoại truyện / vũ trụ song song (có thể gợi ý độc lập hoặc gắn nhãn Spin-off)
+    """
+    df = df.copy()
+    df["num_year"] = pd.to_numeric(df["year"], errors="coerce").fillna(9999)
+    df["is_tv"] = (df["type"].astype(str).str.upper() == "TV").astype(int)
+
+    # 1. Phân loại vai trò dựa trên Title & Synopsis
+    roles = []
+    for _, row in df.iterrows():
+        title = str(row["title"])
+        syn_head = str(row["synopsis"])[:220]
+        s_num = extract_season_number(title)
+
+        if SPINOFF_PATTERNS.search(syn_head) or str(row["type"]).upper() in ("OVA", "SPECIAL", "ONA"):
+            roles.append("SPIN_OFF")
+        elif PREQUEL_PATTERNS.search(syn_head):
+            roles.append("PREQUEL")
+        elif s_num > 1 or SEQUEL_PATTERNS.search(syn_head):
+            roles.append("SEQUEL")
+        else:
+            roles.append("ENTRY")
+
+    df["franchise_role"] = roles
+
+    # 2. Gom nhóm Franchise bằng: Prefix trước dấu ':'/'/' + Trùng tên nhân vật chính + Cùng Studio
+    df["prefix_root"] = (
+        df["title"].astype(str)
+        .str.split(r"[:;/\-–]").str[0]
+        .apply(get_franchise_root)
+    )
+    df["proper_nouns"] = df["synopsis"].apply(extract_proper_nouns)
+    df["main_studio"] = df["studios"].apply(get_main_studio)
+
+    # Tìm Entry Point (bản TV sớm nhất có role == 'ENTRY') cho mỗi prefix_root
+    entry_candidates = df.sort_values(
+        by=["is_tv", "num_year", "anime_id"],
+        ascending=[False, True, True]
+    )
+    prefix_to_entry = {}
+    for _, row in entry_candidates.iterrows():
+        p_root = row["prefix_root"]
+        if len(p_root) >= 4 and p_root not in prefix_to_entry:
+            prefix_to_entry[p_root] = int(row["anime_id"])
+
+    # 3. Xử lý các bộ đổi tên hoàn toàn (không trùng prefix, VD: Bakemonogatari vs Owarimonogatari)
+    # Dựa vào: Cùng Studio + Trùng >= 2 tên nhân vật riêng + Synopsis tương đồng cao
+    entry_id_map = {}
+    studio_groups = df.groupby("main_studio")
+
+    for idx, row in df.iterrows():
+        aid = int(row["anime_id"])
+        p_root = row["prefix_root"]
+        role = row["franchise_role"]
+
+        # Mặc định trỏ theo prefix_root nếu tìm thấy
+        resolved_entry = prefix_to_entry.get(p_root, aid)
+
+        # Nếu vẫn là SEQUEL/PREQUEL nhưng tên đổi hoàn toàn (resolved_entry == aid), dò theo nhân vật + studio
+        if role in ("SEQUEL", "PREQUEL") and resolved_entry == aid:
+            studio = row["main_studio"]
+            nouns_a = row["proper_nouns"]
+            if studio and studio != "Unknown" and len(nouns_a) >= 2 and studio in studio_groups.groups:
+                peers = studio_groups.get_group(studio)
+                # Chỉ tìm các bản phát hành trước đó
+                earlier_peers = peers[peers["num_year"] <= row["num_year"]]
+                best_overlap = 1
+                for _, p_row in earlier_peers.iterrows():
+                    p_aid = int(p_row["anime_id"])
+                    if p_aid == aid:
+                        continue
+                    overlap = len(nouns_a & p_row["proper_nouns"])
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        resolved_entry = entry_id_map.get(p_aid, p_aid)
+
+        entry_id_map[aid] = resolved_entry
+
+    df["entry_anime_id"] = df["anime_id"].astype(int).map(entry_id_map)
+    return df
