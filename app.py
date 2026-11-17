@@ -11,6 +11,7 @@ from data_loader import get_fallback_dataframe, normalize_dataframe, get_main_st
 from recommender_engine import (
     W_G,
     build_multimodal_space,
+    ContextualPriorSeeder,
     LapsedUserPriorSeeder,
     split_full_vector_to_subspaces,
     explain_recommendation,
