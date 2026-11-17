@@ -1,5 +1,4 @@
 import re
-import urllib.request
 import urllib.parse
 import pandas as pd
 import streamlit as st
@@ -8,7 +7,7 @@ import streamlit.components.v1 as components
 from data_loader import get_main_studio
 
 
-# Lấy link nhúng YouTube Trailer từ CSV hoặc tự động tìm kiếm trên YouTube
+# Lấy link nhúng YouTube Trailer từ cột trailer_url trong CSV (không chặn luồng mạng)
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_youtube_trailer_embed(title: str, csv_url: str = "") -> str:
     url = str(csv_url).strip()
@@ -18,26 +17,8 @@ def get_youtube_trailer_embed(title: str, csv_url: str = "") -> str:
         match_v = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
         if match_v:
             return f"https://www.youtube.com/embed/{match_v.group(1)}?rel=0"
-
-    try:
-        query = urllib.parse.quote(f"{title} official anime trailer")
-        search_url = f"https://www.youtube.com/results?search_query={query}"
-        req = urllib.request.Request(
-            search_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9"
-            }
-        )
-        with urllib.request.urlopen(req, timeout=2.0) as response:
-            html = response.read().decode("utf-8", errors="ignore")
-            video_ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
-            if video_ids:
-                return f"https://www.youtube.com/embed/{video_ids[0]}?rel=0"
-    except Exception:
-        pass
-
     return ""
+
 
 # Render thẻ anime bằng HTML/CSS/JS hỗ trợ kéo chuột/cảm ứng (Trái=Pass, Phải=Like, Lên=Trailer)
 def render_tinder_draggable_card(anime_row: pd.Series, sim_score: float, explanation_text: str, pos_tags: list[str]):

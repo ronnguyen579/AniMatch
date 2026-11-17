@@ -180,7 +180,9 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         "episodes": "N/A",
         "year": "N/A",
         "image_url": "",
-        "trailer_url": ""
+        "trailer_url": "",
+        "artstyle_tags": "",
+        "visual_tags_full": ""
     }
     for col, default_val in defaults.items():
         if col not in df.columns:
