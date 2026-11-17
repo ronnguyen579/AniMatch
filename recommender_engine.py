@@ -236,8 +236,20 @@ def compare_anime(df: pd.DataFrame, anime_id_1: int, anime_id_2: int) -> dict:
 
 
 # Cập nhật vector sở thích người dùng bằng Online Rocchio (có suy giảm trí nhớ gamma)
-def update_user_vector_rocchio(v_user: np.ndarray, v_anime: np.ndarray, action: str, gamma: float = 0.95, alpha: float = 0.30, beta: float = 0.15) -> np.ndarray:
-    delta_v = (alpha * v_anime) if action == "like" else (-beta * v_anime)
+def update_user_vector_rocchio(
+    v_user: np.ndarray,
+    v_anime: np.ndarray,
+    action: str,
+    gamma: float = 0.95,
+    alpha: float = 0.30,
+    beta: float = 0.15
+) -> np.ndarray:
+    if action == "like":
+        delta_v = alpha * v_anime
+    elif action == "watched":
+        delta_v = (0.7 * alpha) * v_anime
+    else:
+        delta_v = -beta * v_anime
     return (gamma * v_user) + delta_v
 
 
