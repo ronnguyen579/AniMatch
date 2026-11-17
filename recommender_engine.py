@@ -6,8 +6,13 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import hstack, csr_matrix
 
-from data_loader import clean_pipe_text, get_main_studio, same_franchise
-
+from data_loader import (
+    clean_pipe_text,
+    get_main_studio,
+    same_franchise,
+    extract_season_number,
+    get_franchise_root
+)
 # Trọng số cho 3 không gian con
 W_G = 2.5
 W_S = 0.8
@@ -235,7 +240,7 @@ def update_user_vector_rocchio(v_user: np.ndarray, v_anime: np.ndarray, action: 
 # Tạo bộ thẻ gợi ý kế tiếp bằng Quality Gating + Deduplication + MMR (tối ưu ma trận thưa)
 def generate_diverse_deck(
     df: pd.DataFrame,
-    anime_vectors,
+    anime_vectors: dict,
     v_user: np.ndarray,
     excluded_ids: set,
     swiped_titles: list[str],
@@ -252,9 +257,10 @@ def generate_diverse_deck(
     if not np.any(mask):
         return []
 
-    cand_df = df.loc[mask, ["anime_id", "title", "studios", "score"]].copy()
+    cand_df = df.loc[mask, ["anime_id", "title", "studios", "score", "year", "type"]].copy()
     num_scores = pd.to_numeric(cand_df["score"], errors="coerce").fillna(6.5).values
     cand_df["num_score"] = num_scores
+    cand_df["num_year"] = pd.to_numeric(cand_df["year"], errors="coerce").fillna(9999).values
 
     hq_mask = num_scores >= min_score
     if np.sum(hq_mask) >= deck_size:
@@ -273,25 +279,63 @@ def generate_diverse_deck(
 
     norm_quality = np.clip((cand_df["num_score"].values - 5.0) / 4.5, 0.0, 1.0)
 
+    # 1. XỬ LÝ COLD-START ĐA DẠNG: Nếu v_user == 0, bốc ngẫu nhiên có trọng số từ nhóm phim hay
+    # để mỗi người dùng mở web nhận được 8 bộ mở đầu khác nhau thay vì y hệt nhau
     if np.linalg.norm(v_user) > 1e-9:
         raw_cos = cosine_similarity(cand_matrix, v_user.reshape(1, -1)).flatten()
         norm_cos = (raw_cos + 1.0) / 2.0
         combined_rel = ((1.0 - quality_weight) * norm_cos) + (quality_weight * norm_quality)
+        cand_df["sim_score"] = combined_rel
+        cand_df = cand_df.sort_values(by="sim_score", ascending=False)
     else:
-        combined_rel = norm_quality
+        # Thêm nhiễu ngẫu nhiên có trọng số theo điểm chất lượng để mỗi user có bộ mở đầu riêng
+        rng = np.random.default_rng()
+        jitter = rng.uniform(0.0, 0.35, size=len(cand_df))
+        cand_df["sim_score"] = (0.65 * norm_quality) + jitter
+        cand_df = cand_df.sort_values(by="sim_score", ascending=False)
 
-    cand_df["sim_score"] = combined_rel
-    cand_df = cand_df.sort_values(by="sim_score", ascending=False)
+    # 2. XỬ LÝ BẪY SEASON PHÍA SAU: Tự động đổi Season 2/3/4 về Season 1 nếu user chưa xem phần đầu
+    seen_roots = {get_franchise_root(t) for t in swiped_titles}
 
-    top_pool = cand_df.head(min(len(cand_df), max(deck_size * 5, 35)))
+    # Tạo bảng tra cứu phần mở đầu (Season 1 / năm sớm nhất) cho từng franchise đang có trong cand_df
+    cand_df["root"] = cand_df["title"].apply(get_franchise_root)
+    cand_df["season_num"] = cand_df["title"].apply(extract_season_number)
+    cand_df["is_tv"] = (cand_df["type"].astype(str).str.upper() == "TV").astype(int)
+
+    # Ưu tiên bản TV -> Season 1 -> Năm phát hành sớm nhất làm "cổng vào" (Entry Point) của series
+    entry_df = (
+        cand_df.sort_values(by=["is_tv", "season_num", "num_year"], ascending=[False, True, True])
+        .drop_duplicates(subset=["root"], keep="first")
+    )
+    root_to_entry_row = {row["root"]: row for _, row in entry_df.iterrows()}
+
+    top_pool = cand_df.head(min(len(cand_df), max(deck_size * 5, 35))).copy()
+    resolved_rows = []
+    seen_resolved_ids = set()
+
+    for _, row in top_pool.iterrows():
+        root = row["root"]
+        # Nếu là phần sau (season_num > 1) và user chưa từng tương tác với series này -> đổi sang Season 1
+        if row["season_num"] > 1 and root not in seen_roots and root in root_to_entry_row:
+            target_row = root_to_entry_row[root]
+        else:
+            target_row = row
+
+        tid = int(target_row["anime_id"])
+        if tid not in seen_resolved_ids:
+            seen_resolved_ids.add(tid)
+            resolved_rows.append(target_row)
+
+    resolved_pool = pd.DataFrame(resolved_rows)
+
     gated_df = deduplicate(
-        top_pool,
+        resolved_pool,
         max_per_studio=max_per_studio,
         threshold=franchise_threshold,
         seen_titles=swiped_titles
     )
     if gated_df.empty:
-        gated_df = cand_df.head(deck_size)
+        gated_df = resolved_pool.head(deck_size)
 
     gated_ids = gated_df["anime_id"].tolist()
     n_gated = len(gated_ids)
