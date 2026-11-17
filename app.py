@@ -339,9 +339,12 @@ def _get_effective_excluded_ids() -> set:
     return base_excl | set(cd.keys())
 
 def _get_length_excluded_ids(df: pd.DataFrame, length_filter: str) -> set:
-    if length_filter == "All Lengths":
+    if not length_filter or length_filter == "All Lengths":
         return set()
-    eps = pd.to_numeric(df["episodes"], errors="coerce").fillna(12)
+    # Trích xuất phần số từ cột episodes (xử lý cả "12", "12.0", "24 eps", "Unknown")
+    eps_str = df["episodes"].astype(str).str.extract(r"(\d+(?:\.\d+)?)", expand=False)
+    eps = pd.to_numeric(eps_str, errors="coerce").fillna(12.0)
+
     if length_filter.startswith("Short"):
         return set(df.loc[eps > 13, "anime_id"].astype(int))
     if length_filter.startswith("Medium"):
@@ -675,7 +678,7 @@ def main():
         mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight, length_filter
     )
     prev_params = st.session_state.get("sidebar_params")
-    if prev_params is not None and prev_params != current_sidebar_params:
+    if (prev_params is None or prev_params != current_sidebar_params or not st.session_state.get("deck")):
         st.session_state.deck = generate_diverse_deck(
             df, anime_vectors, st.session_state.v_user,
             _get_all_excluded_ids(df, length_filter), st.session_state.swiped_titles, 8,
@@ -683,7 +686,7 @@ def main():
             V_i=V_i, id_to_idx=id_to_idx
         )
     st.session_state.sidebar_params = current_sidebar_params
-
+    
     if st.session_state.get("show_onboarding_modal", False):
         open_onboarding_modal(
             df, V_i, id_to_idx, anime_vectors, vectorizers, dims, all_genres,
