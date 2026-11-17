@@ -251,7 +251,9 @@ def load_profile_from_browser(
             for item in saved_history:
                 aid, act = int(item[0]), str(item[1])
                 if aid in valid_ids and aid in anime_vectors:
-                    eff_beta = (beta * 0.4) if pos_so_far == 0 else beta
+                    length_factor = _get_length_penalty_factor({"episodes": id_to_eps.get(aid, 12)}, act)
+                    base_beta = (beta * 0.4) if pos_so_far == 0 else beta
+                    eff_beta = base_beta * length_factor
                     v_rebuilt = update_fn(v_rebuilt, anime_vectors[aid], act, gamma, alpha, eff_beta)
                     excluded.add(aid)
                     swiped_titles.append(id_to_title[aid])
@@ -336,6 +338,18 @@ def _get_effective_excluded_ids() -> set:
     cd = st.session_state.get("cooldown_ids", {})
     return base_excl | set(cd.keys())
 
+def _get_length_excluded_ids(df: pd.DataFrame, length_filter: str) -> set:
+    if length_filter == "All Lengths":
+        return set()
+    eps = pd.to_numeric(df["episodes"], errors="coerce").fillna(12)
+    if length_filter.startswith("Short"):
+        return set(df.loc[eps > 13, "anime_id"].astype(int))
+    if length_filter.startswith("Medium"):
+        return set(df.loc[eps > 26, "anime_id"].astype(int))
+    if length_filter.startswith("Exclude Long-Running"):
+        return set(df.loc[eps > 50, "anime_id"].astype(int))
+    return set()
+
 
 def _tick_cooldowns():
     """Giảm 1 nhịp đếm ngược cooldown sau mỗi lần người dùng quẹt sang thẻ mới."""
@@ -346,7 +360,9 @@ def _tick_cooldowns():
     st.session_state.cooldown_ids = updated
 
 
-def _rebuild_user_vector_from_history(anime_vectors: dict, gamma: float, alpha: float, beta: float):
+def _rebuild_user_vector_from_history(
+    anime_lookup: dict, anime_vectors: dict, gamma: float, alpha: float, beta: float
+):
     """Tái tạo lại vector v_user chuẩn xác 100% từ v_user_initial và swipe_history hiện tại."""
     v_rebuilt = (
         st.session_state.v_user_initial.copy()
@@ -355,7 +371,10 @@ def _rebuild_user_vector_from_history(anime_vectors: dict, gamma: float, alpha: 
     )
     pos_so_far = 0
     for aid, act in st.session_state.get("swipe_history", []):
-        eff_beta = (beta * 0.4) if pos_so_far == 0 else beta
+        length_factor = _get_length_penalty_factor(anime_lookup[aid], act) if aid in anime_lookup else 1.0
+        base_beta = (beta * 0.4) if pos_so_far == 0 else beta
+        eff_beta = base_beta * length_factor
+
         v_rebuilt = update_user_vector_rocchio(
             v_rebuilt, anime_vectors[aid], action=act, gamma=gamma, alpha=alpha, beta=eff_beta
         )
@@ -363,7 +382,23 @@ def _rebuild_user_vector_from_history(anime_vectors: dict, gamma: float, alpha: 
             pos_so_far += 1
     st.session_state.v_user = v_rebuilt
 
+def _get_length_penalty_factor(anime_row, action: str) -> float:
+    """Giảm lực trừ điểm nếu user Pass phim quá dài tập (tránh trừ oan gu thể loại)."""
+    if action != "pass":
+        return 1.0
+    try:
+        ep_count = float(anime_row.get("episodes", 12))
+        if np.isnan(ep_count) or ep_count <= 0:
+            ep_count = 12.0
+    except (ValueError, TypeError):
+        ep_count = 12.0
 
+    if ep_count > 52:
+        return 0.20   # Phim > 52 tập: chỉ trừ 20% lực đẩy
+    elif ep_count > 26:
+        return 0.50   # Phim 27-52 tập: trừ 50%
+    return 1.00
+    
 def process_swipe(
     action: str,
     df: pd.DataFrame,
@@ -390,8 +425,11 @@ def process_swipe(
     # Giảm bộ đếm cooldown cho các bộ đã revert trước đó
     _tick_cooldowns()
 
+    # Tính hệ số giảm phạt nếu user Pass phim quá dài tập
+    length_factor = _get_length_penalty_factor(anime_row, action)
     has_positive = (len(st.session_state.liked_ids) + len(st.session_state.watched_ids)) > 0
-    effective_beta = (beta * 0.4) if not has_positive else beta
+    base_beta = (beta * 0.4) if not has_positive else beta
+    effective_beta = base_beta * length_factor
 
     st.session_state.v_user = update_user_vector_rocchio(
         st.session_state.v_user, v_anime, action=action, gamma=gamma, alpha=alpha, beta=effective_beta
@@ -614,11 +652,8 @@ def main():
         st.session_state.v_user_initial = v_user_0.copy()
         st.session_state.v_user = v_user_0
         st.session_state.excluded_ids = excluded_ids
-        st.session_state.deck = generate_diverse_deck(
-            df, anime_vectors, v_user_0, _get_effective_excluded_ids(), [], 8,
-            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
-            V_i=V_i, id_to_idx=id_to_idx
-        )
+        if st.session_state.get("persona_mode") == "Not Selected":
+            st.session_state.persona_mode = "Eyecandy First (Default)"
 
     current_sidebar_params = (mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight)
     prev_params = st.session_state.get("sidebar_params")
@@ -649,6 +684,18 @@ def main():
         f"Liked: **{len(liked_ids)}** • "
         f"Watched: **{len(watched_ids)}**"
     )
+
+    st.subheader("⏱️ Episode Length Preference")
+        length_filter = st.selectbox(
+            "Format / Episode Cap:",
+            [
+                "All Lengths",
+                "Short (≤ 13 eps — 1 Cour)",
+                "Medium (≤ 26 eps — 1-2 Cours)",
+                "Exclude Long-Running (> 50 eps)"
+            ],
+            index=0
+        )
 
     if st.session_state.get("last_action_msg"):
         st.toast(st.session_state.last_action_msg)
