@@ -1,3 +1,4 @@
+import html
 import re
 import urllib.parse
 import pandas as pd
