@@ -726,17 +726,35 @@ def main():
     )
 
     st.subheader("⏱️ Episode Length Preference")
+    def _on_length_filter_change():
+        st.session_state.deck = []
+
     length_filter = st.selectbox(
-            "Format / Episode Length:",
-            [
-                "All Lengths",
-                "Movie / One-Shot (1 ep)",
-                "Short (2–13 eps — 1 Cour)",
-                "Medium (14–26 eps — 2 Cours)",
-                "Long (27–52 eps — 3–4 Cours)",
-                "Endless / Marathon (> 52 eps)"
-            ],
-            index=0
+        "Format / Episode Length:",
+        [
+            "All Lengths",
+            "Movie / One-Shot (1 ep)",
+            "Short (2–13 eps — 1 Cour)",
+            "Medium (14–26 eps — 2 Cours)",
+            "Long (27–52 eps — 3–4 Cours)",
+            "Endless / Marathon (> 52 eps)"
+        ],
+        index=0,
+        key="length_filter_select",
+        on_change=_on_length_filter_change
+    )
+
+    length_excluded = _get_length_excluded_ids(df, length_filter)
+    active_card_invalid = bool(
+        st.session_state.get("deck") and st.session_state.deck[0] in length_excluded
+    )
+
+    if not st.session_state.get("deck") or active_card_invalid:
+        st.session_state.deck = generate_diverse_deck(
+            df, anime_vectors, st.session_state.v_user,
+            _get_all_excluded_ids(df, length_filter), st.session_state.swiped_titles, 8,
+            mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+            V_i=V_i, id_to_idx=id_to_idx
         )
 
     if st.session_state.get("last_action_msg"):
