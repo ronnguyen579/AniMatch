@@ -292,7 +292,18 @@ def generate_diverse_deck(
     if not np.any(mask):
         return []
 
-    cand_df = df.loc[mask, ["anime_id", "title", "studios", "score", "year", "type"]].copy()
+    # Lấy thêm các cột franchise_role & entry_anime_id đã được enrich từ data_loader.py
+    base_cols = ["anime_id", "title", "studios", "score", "year", "type"]
+    for extra_col in ["franchise_role", "entry_anime_id", "prefix_root"]:
+        if extra_col in df.columns:
+            base_cols.append(extra_col)
+
+    cand_df = df.loc[mask, base_cols].copy()
+    if "franchise_role" not in cand_df.columns:
+        cand_df["franchise_role"] = "ENTRY"
+    if "entry_anime_id" not in cand_df.columns:
+        cand_df["entry_anime_id"] = cand_df["anime_id"]
+
     num_scores = pd.to_numeric(cand_df["score"], errors="coerce").fillna(6.5).values
     cand_df["num_score"] = num_scores
     cand_df["num_year"] = pd.to_numeric(cand_df["year"], errors="coerce").fillna(9999).values
@@ -314,8 +325,7 @@ def generate_diverse_deck(
 
     norm_quality = np.clip((cand_df["num_score"].values - 5.0) / 4.5, 0.0, 1.0)
 
-    # 1. XỬ LÝ COLD-START ĐA DẠNG: Nếu v_user == 0, bốc ngẫu nhiên có trọng số từ nhóm phim hay
-    # để mỗi người dùng mở web nhận được 8 bộ mở đầu khác nhau thay vì y hệt nhau
+    # 1. TÍNH ĐIỂM TƯƠNG ĐỒNG HOẶC COLD-START ĐA DẠNG
     if np.linalg.norm(v_user) > 1e-9:
         raw_cos = cosine_similarity(cand_matrix, v_user.reshape(1, -1)).flatten()
         norm_cos = (raw_cos + 1.0) / 2.0
@@ -323,43 +333,70 @@ def generate_diverse_deck(
         cand_df["sim_score"] = combined_rel
         cand_df = cand_df.sort_values(by="sim_score", ascending=False)
     else:
-        # Thêm nhiễu ngẫu nhiên có trọng số theo điểm chất lượng để mỗi user có bộ mở đầu riêng
         rng = np.random.default_rng()
         jitter = rng.uniform(0.0, 0.35, size=len(cand_df))
         cand_df["sim_score"] = (0.65 * norm_quality) + jitter
         cand_df = cand_df.sort_values(by="sim_score", ascending=False)
 
-    # 2. XỬ LÝ BẪY SEASON PHÍA SAU: Tự động đổi Season 2/3/4 về Season 1 nếu user chưa xem phần đầu
+    # 2. ENTRY-POINT GATEKEEPER:
+    # Chặn tuyệt đối Movie hậu truyện / Season sau / Spin-off xuất hiện trước khi user xem phần gốc!
+    interacted_ids = {int(x) for x in excluded_ids}
     seen_roots = {get_franchise_root(t) for t in swiped_titles}
+    if "prefix_root" in df.columns:
+        swiped_set = set(swiped_titles)
+        seen_prefixes = set(df.loc[df["title"].isin(swiped_set), "prefix_root"].dropna().astype(str))
+    else:
+        seen_prefixes = set()
 
-    # Tạo bảng tra cứu phần mở đầu (Season 1 / năm sớm nhất) cho từng franchise đang có trong cand_df
-    cand_df["root"] = cand_df["title"].apply(get_franchise_root)
-    cand_df["season_num"] = cand_df["title"].apply(extract_season_number)
-    cand_df["is_tv"] = (cand_df["type"].astype(str).str.upper() == "TV").astype(int)
+    # Bảng tra cứu nhanh các ứng viên đang hợp lệ trong cand_df (đã qua bộ lọc length_filter & min_score)
+    cand_row_by_id = {int(r["anime_id"]): r for _, r in cand_df.iterrows()}
 
-    # Ưu tiên bản TV -> Season 1 -> Năm phát hành sớm nhất làm "cổng vào" (Entry Point) của series
-    entry_df = (
-        cand_df.sort_values(by=["is_tv", "season_num", "num_year"], ascending=[False, True, True])
-        .drop_duplicates(subset=["root"], keep="first")
-    )
-    root_to_entry_row = {row["root"]: row for _, row in entry_df.iterrows()}
-
-    top_pool = cand_df.head(min(len(cand_df), max(deck_size * 5, 35))).copy()
+    top_pool = cand_df.head(min(len(cand_df), max(deck_size * 6, 45))).copy()
     resolved_rows = []
     seen_resolved_ids = set()
 
     for _, row in top_pool.iterrows():
-        root = row["root"]
-        # Nếu là phần sau (season_num > 1) và user chưa từng tương tác với series này -> đổi sang Season 1
-        if row["season_num"] > 1 and root not in seen_roots and root in root_to_entry_row:
-            target_row = root_to_entry_row[root]
-        else:
-            target_row = row
+        aid = int(row["anime_id"])
+        role = str(row.get("franchise_role", "ENTRY")).upper()
+        entry_id = int(row.get("entry_anime_id", aid))
+        root = get_franchise_root(row["title"])
+        prefix = str(row.get("prefix_root", root))
 
-        tid = int(target_row["anime_id"])
-        if tid not in seen_resolved_ids:
-            seen_resolved_ids.add(tid)
-            resolved_rows.append(target_row)
+        is_followup = (
+            role in ("SEQUEL", "PREQUEL", "SPIN_OFF")
+            or extract_season_number(row["title"]) > 1
+            or (entry_id != aid)
+        )
+        has_seen_origin = (
+            (entry_id in interacted_ids)
+            or (root in seen_roots)
+            or (len(prefix) >= 4 and prefix in seen_prefixes)
+        )
+
+        if is_followup and not has_seen_origin:
+            # Nếu phần gốc (TV Season 1) cũng đang nằm trong tập ứng viên hợp lệ -> tráo sang phần gốc
+            if entry_id != aid and entry_id in cand_row_by_id:
+                target_row = cand_row_by_id[entry_id]
+                tid = int(target_row["anime_id"])
+                if tid not in seen_resolved_ids:
+                    seen_resolved_ids.add(tid)
+                    resolved_rows.append(target_row)
+            # Nếu phần gốc không hợp lệ (ví dụ user đang lọc chỉ xem Movie, hoặc đã quẹt Pass phần gốc)
+            # -> BỎ QUA luôn phần Movie/Sequel ăn theo này!
+            continue
+
+        if aid not in seen_resolved_ids:
+            seen_resolved_ids.add(aid)
+            resolved_rows.append(row)
+
+    # Phòng trường hợp top_pool bị lọc hết sạch do toàn sequel -> lấy dự phòng từ các bản ENTRY thuần trong cand_df
+    if not resolved_rows:
+        pure_entries = cand_df[
+            (cand_df["franchise_role"].astype(str).str.upper() == "ENTRY")
+            & (cand_df["entry_anime_id"].astype(int) == cand_df["anime_id"].astype(int))
+        ]
+        fallback_source = pure_entries if not pure_entries.empty else cand_df
+        resolved_rows = [r for _, r in fallback_source.head(deck_size * 2).iterrows()]
 
     resolved_pool = pd.DataFrame(resolved_rows)
 
