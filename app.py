@@ -940,7 +940,7 @@ def main():
                 st.table(pd.DataFrame(comp_rows))
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-    local_csv_files = sorted([
+local_csv_files = sorted([
         p for p in glob.glob(os.path.join(current_dir, "*.csv"))
         if "jikan_tv_movie_cache" not in os.path.basename(p)
     ])
