@@ -914,6 +914,20 @@ def main():
         user_sub = split_full_vector_to_subspaces(st.session_state.v_user, dims)
         anime_sub = split_full_vector_to_subspaces(v_anime, dims)
         exp_dict = explain_recommendation(user_sub, anime_sub, vectorizers, top_n=3)
+        user_sub = split_full_vector_to_subspaces(st.session_state.v_user, dims)
+        anime_sub = split_full_vector_to_subspaces(v_anime, dims)
+        exp_dict = explain_recommendation(user_sub, anime_sub, vectorizers, top_n=3)
+
+        # --- DỌN SẠCH TỪ KHÓA RÁC ('unknown' và điểm <= 0.01) ---
+        for group_key in ("positive", "negative"):
+            if group_key in exp_dict:
+                for feat in ("genres", "synopsis", "studio"):
+                    exp_dict[group_key][feat] = [
+                        (term, sc) for term, sc in exp_dict[group_key].get(feat, [])
+                        if sc > 0.01 and str(term).strip().lower() not in ("unknown", "nan", "none", "")
+                    ]
+
+        exp_text = explanation_to_text(exp_dict)
         exp_text = explanation_to_text(exp_dict)
 
         pos_keywords = []
@@ -953,7 +967,7 @@ def main():
                 st.rerun()
 
         with col_side:
-            st.markdown("### 🧠 Real-Time Vector & Deck Queue")
+            st.markdown("### 🎯 Your Vibe Radar & Up Next")
             if st.session_state.get("last_action_msg"):
                 st.info(st.session_state.last_action_msg)
 
@@ -979,7 +993,8 @@ def main():
                         st.caption("*(None yet)*")
 
             st.markdown("---")
-            st.markdown("**🃏 Upcoming Diverse Deck (MMR + Studio Cap):**")
+            st.markdown("🔮 **Up Next in Your Queue:**")
+            st.caption("Curated to match your taste while mixing up genres & studios.")
             upcoming_rows = []
             for rank_idx, u_aid in enumerate(st.session_state.deck[:5], start=1):
                 r = anime_lookup[u_aid]
