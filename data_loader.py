@@ -464,6 +464,40 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
 
     # Dọn dẹp cột tạm trước khi trả về
     df = df.drop(columns=["_is_entry_flag"], errors="ignore")
+
+    # 6. DỰNG CHUỖI PHỤ THUỘC TUẦN TỰ (FRANCHISE SEQUENTIAL CHAIN: Step 1 -> Step 2 -> ... -> Movie)
+    # Xác định chính xác phần phim tiền đề (prereq_anime_id) bắt buộc phải xem trước mỗi phần
+    df["_step_priority"] = np.where(
+        df["type"].astype(str).str.upper() == "MOVIE",
+        90,  # Movie thuộc franchise luôn xếp sau các phần TV cùng năm/trước đó (trừ Prequel)
+        df["title"].apply(extract_season_number)
+    )
+    # Nếu là Prequel rõ ràng (VD: Jujutsu Kaisen 0) nhưng là Movie ăn theo TV -> vẫn yêu cầu xem TV gốc trước
+    df.loc[df["franchise_role"] == "PREQUEL", "_step_priority"] = 50
+
+    chain_sorted = df.sort_values(
+        by=["entry_anime_id", "_step_priority", "num_year", "anime_id"],
+        ascending=[True, True, True, True]
+    )
+
+    prereq_map = {}
+    first_unwatched_in_chain = {}
+
+    for entry_id, group in chain_sorted.groupby("entry_anime_id", sort=False):
+        ordered_aids = group["anime_id"].astype(int).tolist()
+        if len(ordered_aids) <= 1:
+            prereq_map[ordered_aids[0]] = 0
+            continue
+
+        # Phần tử đầu tiên trong chuỗi (TV Season 1 / Entry gốc) không có điều kiện tiên quyết (0)
+        prereq_map[ordered_aids[0]] = 0
+        for idx in range(1, len(ordered_aids)):
+            cur_aid = ordered_aids[idx]
+            prev_aid = ordered_aids[idx - 1]
+            prereq_map[cur_aid] = prev_aid
+
+    df["prereq_anime_id"] = df["anime_id"].astype(int).map(prereq_map).fillna(0).astype(int)
+    df = df.drop(columns=["_is_entry_flag", "_step_priority"], errors="ignore")
     return df
 
 def fetch_jikan_catalog(pages_per_type: int = 4, force_refresh: bool = False) -> pd.DataFrame:
