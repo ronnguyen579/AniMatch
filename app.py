@@ -671,20 +671,23 @@ def apply_watched_feedback(
     title = anime_lookup[aid]["title"] if aid in anime_lookup else f"ID {aid}"
 
     if sentiment == "boost":
-        st.session_state.v_user = update_user_vector(
-            st.session_state.v_user, v_item, action="like", gamma=gamma, alpha=alpha, beta=beta
-        )
+        # Cập nhật vector theo hướng Like (+alpha) và chuẩn hóa L2
+        v_new = (gamma * st.session_state.v_user) + (alpha * v_item)
+        norm = np.linalg.norm(v_new)
+        st.session_state.v_user = (v_new / norm) if norm > 1e-9 else v_new
+
         for entry in reversed(st.session_state.swipe_history):
-            if int(entry.get("anime_id", -1)) == aid:
+            if isinstance(entry, dict) and int(entry.get("anime_id", -1)) == aid:
                 entry["taste_boosted"] = True
                 break
         st.session_state.last_action_msg = f"❤️ Boosted taste profile with **{title}**!"
 
     elif sentiment == "dislike":
-        st.session_state.v_user = update_user_vector(
-            st.session_state.v_user, v_item, action="pass", gamma=gamma, alpha=alpha, beta=beta
-        )
-        # Gỡ khỏi watched_ids để không gợi ý Sequel của bộ user không thích, nhưng vẫn giữ trong excluded_ids
+        # Cập nhật vector theo hướng Pass (-beta) và chuẩn hóa L2
+        v_new = (gamma * st.session_state.v_user) - (beta * v_item)
+        norm = np.linalg.norm(v_new)
+        st.session_state.v_user = (v_new / norm) if norm > 1e-9 else v_new
+
         if aid in st.session_state.watched_ids:
             st.session_state.watched_ids.remove(aid)
         if aid not in st.session_state.passed_ids:
