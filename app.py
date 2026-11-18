@@ -56,10 +56,9 @@ div.stButton > button p {
 # ==============================================================================
 # CACHE NẠP DỮ LIỆU & TỪ ĐIỂN TRA CỨU O(1)
 # ==============================================================================
-@st.cache_data(ttl=86400, show_spinner="Fetching TV & Movie catalog from Jikan API...")
-def load_and_prepare_catalog(pages_per_type: int = 8, force_refresh: bool = False):
-    df = fetch_jikan_catalog(pages_per_type=pages_per_type, force_refresh=force_refresh)
-    # Lọc cứng một lần nữa để chắc chắn chỉ giữ TV và Movie
+@st.cache_data(ttl=86400, show_spinner="Building Hybrid Catalog (Live API + Local CSV)...")
+def load_and_prepare_catalog(csv_path: str | None, api_pages: int = 2):
+    df = load_hybrid_catalog(csv_path=csv_path, api_pages=api_pages)
     df = df[df["type"].astype(str).str.upper().isin(["TV", "MOVIE"])].reset_index(drop=True)
 
     all_genres = sorted(list({
@@ -70,7 +69,6 @@ def load_and_prepare_catalog(pages_per_type: int = 8, force_refresh: bool = Fals
     }))
     anime_lookup = {int(row["anime_id"]): row for _, row in df.iterrows()}
     return df, all_genres, anime_lookup
-
 
 # ==============================================================================
 # CỬA SỔ KHỞI TẠO HỒ SƠ (ONBOARDING PERSONA MODAL DIALOG)
@@ -940,6 +938,17 @@ def main():
                         f"Only in {comp['Title']['anime_b']}": ", ".join(vals["different_b"]) if vals["different_b"] else "—",
                     })
                 st.table(pd.DataFrame(comp_rows))
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+    local_csv_files = sorted([
+        p for p in glob.glob(os.path.join(current_dir, "*.csv"))
+        if "jikan_tv_movie_cache" not in os.path.basename(p)
+    ])
+    main_csv_path = local_csv_files[0] if local_csv_files else None
+
+    df, all_genres, anime_lookup = load_and_prepare_catalog(csv_path=main_csv_path, api_pages=2)
+    sig = f"hybrid_{os.path.basename(main_csv_path) if main_csv_path else 'api'}_{len(df)}"
+    data_source_label = f"Hybrid (Live API + {os.path.basename(main_csv_path)})" if main_csv_path else "Live API"
 
 if __name__ == "__main__":
     main()
