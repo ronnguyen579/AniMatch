@@ -462,6 +462,17 @@ def process_swipe(
     st.session_state.swipe_history.append((current_aid, action))
     st.session_state.swipe_count += 1
 
+    aid = int(current_aid)  # Khớp với biến ID của lá bài trên cùng trong process_swipe
+
+    if action == "watched":
+        if aid not in st.session_state.watched_ids:
+            st.session_state.watched_ids.append(aid)
+        st.session_state.excluded_ids.add(aid)
+        st.session_state.swipe_history.append({
+            "anime_id": aid, "title": title, "action": "watched", "taste_boosted": False
+        })
+        st.session_state.last_action_msg = f"👁️ Marked as Watched (Neutral taste — sequels unlocked): **{title}**"
+
     if action == "like":
         st.session_state.liked_ids.append(current_aid)
         st.session_state.last_action_msg = f"💚 LIKED: **{anime_row['title']}**"
