@@ -206,6 +206,32 @@ def get_fallback_dataframe() -> pd.DataFrame:
     ]
     return pd.DataFrame(data)
 
+def load_hybrid_catalog(csv_path: str, api_pages: int = 2) -> pd.DataFrame:
+    # 1. Đọc kho nền tảng 12.000 bộ từ CSV và lọc chỉ giữ TV & Movie
+    csv_df = pd.read_csv(csv_path)
+    csv_df = csv_df[csv_df["type"].astype(str).str.upper().isin(["TV", "MOVIE"])].copy()
+
+    # 2. Kéo 100 bộ mới/thịnh hành nhất từ AniList (tốn ~0.4 giây)
+    api_df = fetch_anilist_trending(pages=api_pages)
+
+    # 3. Đặt api_df lên đầu để ưu tiên dữ liệu mới & poster HD, khử trùng theo mal_id
+    combined = pd.concat([api_df, csv_df], ignore_index=True)
+    combined["mal_id"] = pd.to_numeric(combined["mal_id"], errors="coerce")
+    combined = combined.dropna(subset=["mal_id"])
+    combined["mal_id"] = combined["mal_id"].astype(int)
+    combined["anime_id"] = combined["mal_id"]
+
+    # Giữ bản đầu tiên (từ API nếu trùng, từ CSV nếu chỉ có trong kho tĩnh)
+    combined = combined.drop_duplicates(subset=["mal_id"], keep="first").reset_index(drop=True)
+
+    # Khử trùng lớp 2 phòng trường hợp lệch ID nhưng trùng tên + năm phát hành
+    combined["_dedup_key"] = (
+        combined["title"].apply(normalize_title) + "_" + combined["year"].astype(str)
+    )
+    combined = combined.drop_duplicates(subset=["_dedup_key"], keep="first").drop(columns=["_dedup_key"])
+
+    return normalize_dataframe(combined.reset_index(drop=True))
+
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
