@@ -333,6 +333,7 @@ def init_session_state():
         "pending_ls_clear": False,
         "pending_ls_save": False,
         "ls_checked": False,
+        "consecutive_passes": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -470,6 +471,30 @@ def process_swipe(
     else:
         st.session_state.passed_ids.append(current_aid)
         st.session_state.last_action_msg = f"❌ PASSED: **{anime_row['title']}**"
+
+    if action == "pass":
+        st.session_state.consecutive_passes = st.session_state.get("consecutive_passes", 0) + 1
+    elif action in ("like", "watched"):
+        st.session_state.consecutive_passes = 0
+
+    streak = st.session_state.get("consecutive_passes", 0)
+    effective_mmr = mmr_lambda
+
+    # Tự động phát hiện đi sai hướng khi Pass liên tiếp
+    if streak >= 5:
+        # Kéo vector người dùng thoát khỏi vùng kẹt, pha trộn lại 60% vector gốc + 40% vector hiện tại
+        if st.session_state.get("v_user_initial") is not None:
+            st.session_state.v_user = (
+                0.60 * st.session_state.v_user_initial + 0.40 * st.session_state.v_user
+            )
+        effective_mmr = 0.30  # Ép đa dạng hóa tối đa ở deck mới
+        st.session_state.consecutive_passes = 0
+        st.session_state.last_action_msg = "🧭 5 passes in a row — Auto-pivoting to fresh genres & hidden gems!"
+    elif streak >= 3:
+        # Giảm mmr_lambda để bắt đầu dò sang các cụm thể loại khác
+        effective_mmr = min(mmr_lambda, 0.40)
+        st.session_state.last_action_msg = "🔀 Exploring wider genres to find your vibe..."
+    
 
     st.session_state.deck = generate_diverse_deck(
         df=df,
