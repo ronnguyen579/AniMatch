@@ -206,12 +206,19 @@ STORAGE_KEY = "animatch_user_profile_v1"
 def save_profile_to_browser():
     if not HAS_JS_EVAL:
         return
+    clean_history = []
+    for item in st.session_state.get("swipe_history", []):
+        if isinstance(item, dict):
+            clean_history.append([int(item["anime_id"]), str(item["action"])])
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            clean_history.append([int(item[0]), str(item[1])])
+
     payload = {
         "persona_mode": st.session_state.get("persona_mode", "Not Selected"),
         "liked_ids": [int(x) for x in st.session_state.get("liked_ids", [])],
         "passed_ids": [int(x) for x in st.session_state.get("passed_ids", [])],
         "watched_ids": [int(x) for x in st.session_state.get("watched_ids", [])],
-        "swipe_history": [[int(aid), str(act)] for aid, act in st.session_state.get("swipe_history", [])],
+        "swipe_history": clean_history,
         "swipe_count": int(st.session_state.get("swipe_count", 0)),
     }
     set_local_storage(STORAGE_KEY, json.dumps(payload))
@@ -462,7 +469,7 @@ def process_swipe(
     st.session_state.swipe_history.append((current_aid, action))
     st.session_state.swipe_count += 1
 
-    aid = int(current_aid)  # Khớp với biến ID của lá bài trên cùng trong process_swipe
+    aid = int(current_aid)
     title = anime_lookup[aid]["title"] if aid in anime_lookup else f"ID {aid}"
 
     if action == "watched":
@@ -476,19 +483,14 @@ def process_swipe(
 
     if action == "like":
         st.session_state.liked_ids.append(current_aid)
-        st.session_state.last_action_msg = f"💚 LIKED: **{anime_row['title']}**"
+        st.session_state.last_action_msg = f"💚 LIKED: **{title}**"
     elif action == "watched":
         if aid not in st.session_state.watched_ids:
             st.session_state.watched_ids.append(aid)
-        st.session_state.excluded_ids.add(aid)
-        # Trọng số = 0 (Neutral): Chỉ ẩn thẻ và mở khóa Sequel, KHÔNG làm lệch vector gu v_user
-        st.session_state.swipe_history.append({
-            "anime_id": aid, "title": title, "action": "watched", "taste_boosted": False
-        })
         st.session_state.last_action_msg = f"👁️ Marked as Watched (Neutral taste — sequels unlocked): **{title}**"
     else:
         st.session_state.passed_ids.append(current_aid)
-        st.session_state.last_action_msg = f"❌ PASSED: **{anime_row['title']}**"
+        st.session_state.last_action_msg = f"❌ PASSED: **{title}**"
 
     if action == "pass":
         st.session_state.consecutive_passes = st.session_state.get("consecutive_passes", 0) + 1
