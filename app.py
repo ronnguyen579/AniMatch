@@ -7,7 +7,6 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics.pairwise import cosine_similarity
 
-from data_loader import get_fallback_dataframe, normalize_dataframe, get_main_studio
 from recommender_engine import (
     W_G,
     build_multimodal_space,
@@ -32,6 +31,7 @@ from data_loader import (
     normalize_dataframe,
     get_main_studio,
     fetch_jikan_catalog,
+    load_hybrid_catalog,
 )
 
 # ==============================================================================
