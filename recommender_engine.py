@@ -300,7 +300,6 @@ def generate_diverse_deck(
 
     # =========================================================================
     # BƯỚC 1: LỌC LOẠI TRỪ & LỌC CHẤT LƯỢNG (QUALITY FILTERING)
-    # Tác dụng: Loại bỏ các phim user đã quẹt/xem/ẩn và lọc ra các phim đạt ngưỡng điểm tối thiểu.
     # =========================================================================
     mask = ~df["anime_id"].isin(excluded_ids).values
     if not np.any(mask):
@@ -321,7 +320,6 @@ def generate_diverse_deck(
     cand_df["num_score"] = num_scores
     cand_df["num_year"] = pd.to_numeric(cand_df["year"], errors="coerce").fillna(9999).values
 
-    # Ưu tiên lấy các phim có điểm >= min_score; nếu thiếu bài thì nới lỏng xuống (min_score - 1.0)
     hq_mask = num_scores >= min_score
     if np.sum(hq_mask) >= deck_size:
         cand_df = cand_df[hq_mask]
@@ -334,9 +332,6 @@ def generate_diverse_deck(
 
     # =========================================================================
     # BƯỚC 2: TÍNH ĐIỂM PHÙ HỢP CÁ NHÂN (RELEVANCE & COLD-START SCORING)
-    # Tác dụng: Kết hợp độ tương đồng vector (v_user) với điểm chất lượng phim.
-    # Nếu user mới tinh (v_user == 0), trộn thêm nhiễu ngẫu nhiên có trọng số để mỗi lần mở app
-    # nhận được bộ thẻ mở đầu khác nhau.
     # =========================================================================
     if V_i is not None and id_to_idx is not None:
         cand_matrix = V_i[[id_to_idx[aid] for aid in cand_ids]]
@@ -357,42 +352,43 @@ def generate_diverse_deck(
 
     # =========================================================================
     # BƯỚC 3: KIỂM SOÁT NHỊP ĐỘ FRANCHISE (FRANCHISE COOLDOWN & PACING)
-    # Tác dụng: Ngăn hiện tượng "hiệu ứng đường hầm" — khi user vừa Like phần 1, hệ thống
-    # tạm khóa các phần tiếp theo trong 4 lượt quẹt và giảm nhẹ trọng số Sequel (0.88x)
-    # để user có không gian đổi sang series/thể loại mới trước khi cày tiếp phần sau.
+    # Kết hợp cả khóa đồ thị AniList (entry_anime_id) lẫn chuỗi tên gốc (get_franchise_root)
     # =========================================================================
-    recent_titles = swiped_titles[-4:] if swiped_titles else []
-    recent_roots = {get_franchise_root(t) for t in recent_titles}
-    if "prefix_root" in df.columns and recent_titles:
-        recent_prefixes = set(
-            df.loc[df["title"].isin(set(recent_titles)), "prefix_root"].dropna().astype(str)
-        )
-    else:
-        recent_prefixes = set()
+    id_to_f_key = {}
+    title_to_f_key = {}
+    for _, r in df.iterrows():
+        aid = int(r["anime_id"])
+        e_id = int(r.get("entry_anime_id", 0) or 0)
+        f_key = f"entry_{e_id}" if e_id > 0 else f"root_{get_franchise_root(r['title'])}"
+        id_to_f_key[aid] = f_key
+        title_to_f_key[str(r["title"]).strip().lower()] = f_key
+
+    recent_titles = [str(t).strip().lower() for t in (swiped_titles or [])[-4:]]
+    cooldown_f_keys = {title_to_f_key[t] for t in recent_titles if t in title_to_f_key}
+    cooldown_roots = {get_franchise_root(t) for t in recent_titles}
 
     is_seq_mask = cand_df["franchise_role"].astype(str).str.upper().isin(["SEQUEL", "PREQUEL", "SPIN_OFF"])
     cand_df.loc[is_seq_mask, "sim_score"] = cand_df.loc[is_seq_mask, "sim_score"] * 0.88
 
     def _is_in_franchise_cooldown(row) -> bool:
-        r_root = get_franchise_root(row["title"])
-        r_pref = str(row.get("prefix_root", r_root))
-        return (r_root in recent_roots) or (len(r_pref) >= 4 and r_pref in recent_prefixes)
+        c_aid = int(row["anime_id"])
+        c_f_key = id_to_f_key.get(c_aid, f"root_{get_franchise_root(row['title'])}")
+        c_root = get_franchise_root(row["title"])
+        return (c_f_key in cooldown_f_keys) or (c_root in cooldown_roots)
 
     non_cooldown_df = cand_df[~cand_df.apply(_is_in_franchise_cooldown, axis=1)]
     if len(non_cooldown_df) >= deck_size * 2:
         cand_df = non_cooldown_df
 
     cand_df = cand_df.sort_values(by="sim_score", ascending=False)
+
     # =========================================================================
     # BƯỚC 4: STRICT SEQUENTIAL GATEKEEPER (KHÓA TUẦN TỰ TỪNG NẤC SEASON & MOVIE)
-    # Tác dụng: Đảm bảo Season N hoặc Movie của một franchise KHÔNG BAO GIỜ xuất hiện
-    # khi user chưa đánh dấu "Already Watched" cho phần gốc và tất cả các phần trước đó.
     # =========================================================================
     watched_set = {int(x) for x in (watched_ids or [])}
     watched_titles = set(df.loc[df["anime_id"].isin(watched_set), "title"].astype(str))
     watched_roots = {get_franchise_root(t) for t in watched_titles}
 
-    # Map toàn cục từ df để truy ngược chuỗi prereq_anime_id chính xác
     full_prereq_map = dict(zip(
         df["anime_id"].astype(int),
         df.get("prereq_anime_id", pd.Series(0, index=df.index)).astype(int)
@@ -428,7 +424,6 @@ def generate_diverse_deck(
         prereq_id = int(full_prereq_map.get(aid, 0))
         root = get_franchise_root(row["title"])
 
-        # Kiểm tra xem bộ này có phải là phần sau / Movie thuộc franchise chưa xem phần trước không
         needs_prereq = (prereq_id > 0 and prereq_id not in watched_set)
         is_unwatched_followup = (
             (role in ("SEQUEL", "PREQUEL", "SPIN_OFF") or extract_season_number(row["title"]) > 1 or entry_id != aid)
@@ -437,27 +432,22 @@ def generate_diverse_deck(
         )
 
         if needs_prereq or is_unwatched_followup:
-            # Tìm đúng phần phim bắt buộc phải xem trước (VD: Movie -> Season 2 -> Season 1)
             required_aid = _find_next_required_part(aid)
             if required_aid == aid and entry_id != aid and entry_id not in watched_set:
                 required_aid = entry_id
 
-            # Nếu phần bắt buộc đó nằm trong tập ứng viên hợp lệ (đúng filter hiện tại) -> tráo sang phần đó
             if required_aid != aid and required_aid in cand_row_by_id:
                 target_row = cand_row_by_id[required_aid]
                 tid = int(target_row["anime_id"])
                 if tid not in seen_resolved_ids:
                     seen_resolved_ids.add(tid)
                     resolved_rows.append(target_row)
-            # Nếu phần bắt buộc không có trong cand_df (VD: user đang bật bộ lọc chỉ xem Movie
-            # trong khi phần bắt buộc là TV Series) -> CHẶN HOÀN TOÀN Movie này!
             continue
 
         if aid not in seen_resolved_ids:
             seen_resolved_ids.add(aid)
             resolved_rows.append(row)
 
-    # Dự phòng: Nếu toàn bộ top_pool đều bị khóa do thiếu tiền đề, chỉ lấy các bản ENTRY thuần túy
     if not resolved_rows:
         pure_entries = cand_df[
             (cand_df["franchise_role"].astype(str).str.upper() == "ENTRY")
@@ -467,10 +457,9 @@ def generate_diverse_deck(
         resolved_rows = [r for _, r in fallback_source.head(deck_size * 2).iterrows()]
 
     resolved_pool = pd.DataFrame(resolved_rows)
+
     # =========================================================================
     # BƯỚC 5: KHỬ TRÙNG STUDIO & TÊN GẦN GIỐNG (DEDUPLICATION & STUDIO CAP)
-    # Tác dụng: Giới hạn tối đa `max_per_studio` bộ từ cùng 1 xưởng phim trong nhóm ứng viên
-    # và loại bỏ các bản trùng tên mờ (fuzzy match >= franchise_threshold).
     # =========================================================================
     gated_df = deduplicate(
         resolved_pool,
@@ -488,9 +477,7 @@ def generate_diverse_deck(
 
     # =========================================================================
     # BƯỚC 6: TÁI XẾP HẠNG ĐA DẠNG HÓA MMR (MAXIMAL MARGINAL RELEVANCE)
-    # Tác dụng: Chọn lần lượt từng thẻ vào deck sao cho vừa bám sát gu user (mmr_lambda),
-    # vừa khác biệt nội dung với các thẻ đã chọn trước đó (1 - mmr_lambda), đồng thời khóa
-    # cứng mỗi franchise chỉ xuất hiện tối đa 1 lần duy nhất trong deck 8 thẻ.
+    # Khóa cứng tối đa 1 thẻ / 1 franchise (theo cả entry_anime_id và tên gốc) trong cùng 1 deck
     # =========================================================================
     if V_i is not None and id_to_idx is not None:
         pairwise_sim = cosine_similarity(V_i[[id_to_idx[aid] for aid in gated_ids]])
@@ -498,14 +485,23 @@ def generate_diverse_deck(
         pairwise_sim = cosine_similarity(np.vstack([anime_vectors[aid] for aid in gated_ids]))
 
     user_sims = gated_df["sim_score"].values
-    gated_roots = [get_franchise_root(t) for t in gated_df["title"].tolist()]
+    gated_titles = gated_df["title"].tolist()
+    gated_roots = [get_franchise_root(t) for t in gated_titles]
+    gated_f_keys = [
+        id_to_f_key.get(int(aid), f"root_{gated_roots[i]}")
+        for i, aid in enumerate(gated_ids)
+    ]
 
     selected_pos = [0]
     selected_roots = {gated_roots[0]}
+    selected_f_keys = {gated_f_keys[0]}
     remaining_pos = list(range(1, n_gated))
 
     while remaining_pos and len(selected_pos) < deck_size:
-        fresh_franchise_pos = [p for p in remaining_pos if gated_roots[p] not in selected_roots]
+        fresh_franchise_pos = [
+            p for p in remaining_pos
+            if (gated_roots[p] not in selected_roots) and (gated_f_keys[p] not in selected_f_keys)
+        ]
         pool_to_pick = fresh_franchise_pos if fresh_franchise_pos else remaining_pos
 
         max_sim_to_selected = np.max(pairwise_sim[np.ix_(pool_to_pick, selected_pos)], axis=1)
@@ -516,5 +512,6 @@ def generate_diverse_deck(
         remaining_pos.remove(chosen_pos)
         selected_pos.append(chosen_pos)
         selected_roots.add(gated_roots[chosen_pos])
+        selected_f_keys.add(gated_f_keys[chosen_pos])
 
     return [gated_ids[p] for p in selected_pos]
