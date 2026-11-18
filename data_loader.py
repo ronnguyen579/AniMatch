@@ -218,7 +218,8 @@ def load_hybrid_catalog(csv_path: str | None, api_pages: int = 2) -> pd.DataFram
     if csv_path and os.path.exists(csv_path):
         csv_df = pd.read_csv(csv_path)
         if "type" in csv_df.columns:
-            csv_df = csv_df[csv_df["type"].astype(str).str.upper().isin(["TV", "MOVIE"])].copy()
+            t_col = csv_df["type"].fillna("TV").astype(str).str.upper().str.strip()
+            csv_df = csv_df[t_col.str.contains(r"\b(?:TV|MOVIE)\b", regex=True)].copy()
 
         # Đồng bộ cột mal_id và anime_id trước khi gộp để không bị dropna xóa nhầm
         if "mal_id" not in csv_df.columns and "anime_id" in csv_df.columns:
