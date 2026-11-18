@@ -561,6 +561,55 @@ def revert_swiped_anime(
         f"↩️ REVERTED **{target_title}**: Weights undone! It will reappear naturally later (not in the current deck)."
     )
 
+def mark_liked_as_watched(
+    aid: int,
+    df: pd.DataFrame,
+    V_i,
+    id_to_idx: dict,
+    anime_lookup: dict,
+    anime_vectors: dict,
+    mmr_lambda: float,
+    max_per_studio: int,
+    franchise_thresh: int,
+    min_score: float,
+    quality_weight: float,
+    length_filter: str
+):
+    """
+    Chuyển một anime từ danh sách Liked Watchlist sang Already Watched:
+    - Giữ nguyên đóng góp của phim vào vector sở thích v_user (không trừ điểm).
+    - Mở khóa các phần tiếp theo (Sequel / Movie tổng kết) của franchise này trong deck.
+    """
+    aid = int(aid)
+    if aid in st.session_state.liked_ids:
+        st.session_state.liked_ids.remove(aid)
+    if aid not in st.session_state.watched_ids:
+        st.session_state.watched_ids.append(aid)
+
+    st.session_state.excluded_ids.add(aid)
+    if aid in st.session_state.cooldown_ids:
+        del st.session_state.cooldown_ids[aid]
+
+    title = anime_lookup[aid]["title"] if aid in anime_lookup else f"ID {aid}"
+    if title not in st.session_state.swiped_titles:
+        st.session_state.swiped_titles.append(title)
+
+    # Cập nhật lịch sử swipe nếu có bản ghi 'like' của phim này
+    for entry in reversed(st.session_state.swipe_history):
+        if int(entry.get("anime_id", -1)) == aid and entry.get("action") == "like":
+            entry["action"] = "watched"
+            break
+
+    # Sinh lại deck mới để các phần hậu truyện của phim vừa xem xong được mở khóa hợp lệ
+    st.session_state.deck = generate_diverse_deck(
+        df, anime_vectors, st.session_state.v_user,
+        _get_all_excluded_ids(df, length_filter), st.session_state.swiped_titles, 8,
+        mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+        V_i=V_i, id_to_idx=id_to_idx,
+        watched_ids=st.session_state.watched_ids
+    )
+    st.session_state.last_action_msg = f"👁️ Marked **{title}** as Watched — sequels unlocked!"
+
 
 def main():
     init_session_state()
@@ -850,19 +899,28 @@ def main():
             "⚖️ Side-by-Side Comparison"
         ])
 
-        with tab_liked:
+       with tab_liked:
             if liked_ids:
-                st.caption("Your saved watchlist. Click **↩️ Revert** to remove an item, undo its weight, and let it re-enter the pool naturally later.")
+                st.caption("Your saved watchlist. Click **👁️ Watched** once you finish a series to unlock its sequels, or **↩️ Revert** to undo.")
                 for l_aid in reversed(liked_ids):
                     if l_aid not in anime_lookup:
                         continue
                     l_row = anime_lookup[l_aid]
-                    c_info, c_btn = st.columns([4.2, 1])
+                    c_info, c_watch, c_btn = st.columns([3.6, 1.1, 0.9])
                     with c_info:
                         st.markdown(
                             f"**{l_row['title']}** &nbsp;•&nbsp; ⭐ {l_row['score']} &nbsp;•&nbsp; "
                             f"🎬 {get_main_studio(l_row['studios'])} &nbsp;•&nbsp; `{l_row['genres']}`"
                         )
+                    with c_watch:
+                        if st.button("👁️ Watched", key=f"mark_watched_{l_aid}", use_container_width=True):
+                            mark_liked_as_watched(
+                                l_aid, df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                mmr_lambda, max_per_studio, franchise_thresh, min_score,
+                                quality_weight, length_filter
+                            )
+                            st.session_state.pending_ls_save = True
+                            st.rerun()
                     with c_btn:
                         if st.button("↩️ Revert", key=f"revert_like_{l_aid}", use_container_width=True):
                             revert_swiped_anime(
