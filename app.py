@@ -1006,37 +1006,70 @@ def main():
 
         with tab_liked:
             if liked_ids:
-                st.caption("Your saved watchlist. Click **👁️ Watched** once you finish a series to unlock its sequels, or **↩️ Revert** to undo.")
-                for l_aid in reversed(liked_ids):
-                    if l_aid not in anime_lookup:
-                        continue
-                    l_row = anime_lookup[l_aid]
-                    c_info, c_watch, c_btn = st.columns([3.6, 1.1, 0.9])
-                    with c_info:
-                        st.markdown(
-                            f"**{l_row['title']}** &nbsp;•&nbsp; ⭐ {l_row['score']} &nbsp;•&nbsp; "
-                            f"🎬 {get_main_studio(l_row['studios'])} &nbsp;•&nbsp; `{l_row['genres']}`"
-                        )
-                    with c_watch:
-                        if st.button("👁️ Watched", key=f"mark_watched_{l_aid}", use_container_width=True):
-                            mark_liked_as_watched(
-                                l_aid, df, V_i, id_to_idx, anime_lookup, anime_vectors,
-                                mmr_lambda, max_per_studio, franchise_thresh, min_score,
-                                quality_weight, length_filter
-                            )
-                            st.session_state.pending_ls_save = True
-                            st.rerun()
-                    with c_btn:
-                        if st.button("↩️ Revert", key=f"revert_like_{l_aid}", use_container_width=True):
-                            revert_swiped_anime(
-                                l_aid, "liked", df, V_i, id_to_idx, anime_lookup, anime_vectors,
-                                gamma, alpha, beta, mmr_lambda, max_per_studio,
-                                franchise_thresh, min_score, quality_weight, length_filter
-                            )
-                            st.session_state.pending_ls_save = True
-                            st.rerun()
-            else:
-                st.caption("No anime liked yet. Drag a card right (or press `→`) to add to your watchlist!")
+                # 1. Tính điểm "Vibe Match hiện tại" cho từng bộ trong Liked Watchlist
+                valid_liked = [aid for aid in liked_ids if aid in anime_lookup]
+                has_profile = np.linalg.norm(st.session_state.v_user) > 1e-9
+
+                scored_liked = []
+                for aid in valid_liked:
+                    row = anime_lookup[aid]
+                    if has_profile and aid in anime_vectors:
+                        raw_sim = float(np.dot(anime_vectors[aid], st.session_state.v_user))
+                        vibe_pct = int(np.clip(((raw_sim + 1.0) / 2.0) * 100, 0, 99))
+                    else:
+                        vibe_pct = int(np.clip((float(row.get("score", 7.5)) / 10.0) * 100, 50, 95))
+                    scored_liked.append((aid, row, vibe_pct))
+
+                # 2. Thanh "Watch-Next Decision Bar" (Chốt nhanh bộ nên xem tối nay)
+                c_filter, c_pick = st.columns([3.2, 1.4])
+                with c_filter:
+                    watch_mood = st.selectbox(
+                        "What are you in the mood to watch right now?",
+                        [
+                            "🔥 Best Match with My Current Vibe",
+                            "🎬 Movie Night (Finish in ~2 Hours)",
+                            "⚡ Weekend Binge (Short Series ≤ 13 Eps)",
+                            "⭐ Highest Rated First"
+                        ],
+                        key="liked_sort_mood",
+                        label_visibility="collapsed"
+                    )
+                with c_pick:
+                    if st.button("🎲 Pick 1 Tonight!", use_container_width=True, type="primary"):
+                        # Chọn ngẫu nhiên có trọng số từ Top 3 bộ đứng đầu bộ lọc hiện tại
+                        top_pool = scored_liked[:3] if scored_liked else []
+                        if top_pool:
+                            chosen_aid, chosen_row, chosen_pct = top_pool[
+                                int(np.random.default_rng().integers(0, len(top_pool)))
+                            ]
+                            st.session_state.tonight_pick_id = chosen_aid
+
+                # Lọc & sắp xếp danh sách theo ngữ cảnh user chọn
+                display_list = list(reversed(scored_liked))  # Mặc định mới nhất lên đầu
+                if "Best Match" in watch_mood:
+                    display_list = sorted(scored_liked, key=lambda x: (x[2], float(x[1].get("score", 0))), reverse=True)
+                elif "Movie Night" in watch_mood:
+                    movies_only = [x for x in scored_liked if str(x[1].get("type", "")).upper() == "MOVIE"]
+                    display_list = sorted(movies_only, key=lambda x: x[2], reverse=True) if movies_only else display_list
+                elif "Weekend Binge" in watch_mood:
+                    short_tv = [
+                        x for x in scored_liked
+                        if str(x[1].get("type", "")).upper() == "TV"
+                        and 1 <= pd.to_numeric(x[1].get("episodes", 99), errors="coerce") <= 13
+                    ]
+                    display_list = sorted(short_tv, key=lambda x: x[2], reverse=True) if short_tv else display_list
+                elif "Highest Rated" in watch_mood:
+                    display_list = sorted(scored_liked, key=lambda x: float(x[1].get("score", 0)), reverse=True)
+
+                # Hiển thị thẻ "Tonight's Spotlight Pick" nếu user vừa bấm nút Pick 1 Tonight!
+                pick_id = st.session_state.get("tonight_pick_id")
+                if pick_id and pick_id in anime_lookup:
+                    p_row = anime_lookup[pick_id]
+                    p_pct = next((pct for a, _, pct in scored_liked if a == pick_id), 85)
+                    st.info(
+                        f"🎯 **Tonight's Pick:** **{p_row['title']}** ({p_row['type']}, {p_row.get('episodes', '?')} eps) "
+                        f"— **{p_pct}% Current Vibe Match** • ⭐ {p_row['score']} • 🎬 {get_main_studio(p_row['studios'])}"
+                    )
 
         with tab_watched:
             if watched_ids:
