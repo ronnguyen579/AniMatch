@@ -547,6 +547,40 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
             prev_aid = ordered_aids[idx - 1]
             prereq_map[cur_aid] = prev_aid
 
+    # 7. GHI ĐÈ CHÍNH XÁC BẰNG ĐỒ THỊ ANILIST (NẾU CÓ CỘT franchise_sorted_mal_ids)
+    # Giúp bắt trọn các phần đổi tên hoàn toàn (VD: Monogatari Series, Fate, Evangelion)
+    if "franchise_sorted_mal_ids" in df.columns:
+        valid_catalog_ids = set(df["anime_id"].astype(int).tolist())
+        id_to_idx_map = {int(aid): idx for idx, aid in enumerate(df["anime_id"].astype(int))}
+
+        for idx, row in df.iterrows():
+            raw_chain = row.get("franchise_sorted_mal_ids")
+            if pd.isna(raw_chain) or not str(raw_chain).strip():
+                continue
+            try:
+                chain_ids = [int(x) for x in json.loads(str(raw_chain)) if int(x) in valid_catalog_ids]
+            except Exception:
+                continue
+
+            if len(chain_ids) <= 1:
+                continue
+
+            cur_aid = int(row["anime_id"])
+            if cur_aid not in chain_ids:
+                continue
+
+            root_entry_id = chain_ids[0]
+            pos = chain_ids.index(cur_aid)
+            df.at[idx, "entry_anime_id"] = root_entry_id
+
+            if pos == 0:
+                df.at[idx, "prereq_anime_id"] = 0
+                df.at[idx, "franchise_role"] = "ENTRY"
+            else:
+                df.at[idx, "prereq_anime_id"] = chain_ids[pos - 1]
+                if df.at[idx, "franchise_role"] == "ENTRY":
+                    df.at[idx, "franchise_role"] = "SEQUEL"
+
     df["prereq_anime_id"] = df["anime_id"].astype(int).map(prereq_map).fillna(0).astype(int)
     df = df.drop(columns=["_is_entry_flag", "_step_priority"], errors="ignore")
     return df
