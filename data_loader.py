@@ -72,8 +72,12 @@ SPINOFF_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-MOVIE_SUFFIX_PATTERN = re.compile(
-    r"[:;\-–]?\s*\b(the\s+movie|movie\s*\d*|gekijouban|theatrical\s+edition)\b.*$",
+FRANCHISE_SUFFIX_PATTERN = re.compile(
+    r"[:;\-–]?\s*\b("
+    r"the\s+movie|movie\s*\d*|gekijouban|theatrical\s+edition|"
+    r"gaiden|side\s*story|spin-?off|another\s+story|extra\s+edition|"
+    r"alternative|ova|ona|specials?|recap|summary"
+    r")\b.*$",
     re.IGNORECASE
 )
 
@@ -427,19 +431,36 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
             tv_prefix_to_entry[p_root] = int(row["anime_id"])
 
     # Nhận diện riêng các bộ Movie: phân biệt Standalone Movie vs Franchise Movie
-    movie_mask = df["type"].astype(str).str.upper() == "MOVIE"
-    for idx, row in df[movie_mask].iterrows():
+    # Tạo tập khóa gốc của tất cả các bản TV Series chính (ENTRY) có trong dataset
+    tv_entry_df = df[(df["is_tv"] == 1) & (df["franchise_role"] == "ENTRY")]
+    tv_prefix_to_entry = {}
+    for _, row in tv_entry_df.sort_values(by=["num_year", "anime_id"]).iterrows():
+        p_root = row["prefix_root"]
+        if len(p_root) >= 4 and p_root not in tv_prefix_to_entry:
+            tv_prefix_to_entry[p_root] = int(row["anime_id"])
+
+    # Nhận diện mọi Movie ăn theo hoặc phần Gaiden / Spin-off (kể cả bản TV lẫn bản Movie)
+    gaiden_title_regex = re.compile(r"\b(gaiden|side\s*story|spin-?off|another\s+story|alternative)\b", re.IGNORECASE)
+
+    for idx, row in df.iterrows():
         aid = int(row["anime_id"])
         p_root = row["prefix_root"]
-        core_root = extract_movie_series_core(row["title"])
+        core_root = extract_series_core(row["title"])
+        is_movie = str(row["type"]).upper() == "MOVIE"
+        has_gaiden_kw = bool(gaiden_title_regex.search(str(row["title"])))
 
-        # Khớp theo prefix gốc hoặc lõi tên sau khi cắt chữ 'Movie' / 'The Movie'
+        # Bỏ qua các bản TV chính gốc không có từ khóa Gaiden
+        if not is_movie and not has_gaiden_kw and df.at[idx, "franchise_role"] == "ENTRY":
+            continue
+
         matched_tv_id = tv_prefix_to_entry.get(p_root) or tv_prefix_to_entry.get(core_root)
 
         if matched_tv_id and matched_tv_id != aid:
-            # Đây là Movie của một bộ TV Anime -> gắn liên kết về bản TV gốc và khóa tuần tự
+            # Gắn prefix_root về đúng series gốc để gom chung vào một chuỗi phụ thuộc
             df.at[idx, "prefix_root"] = core_root if core_root in tv_prefix_to_entry else p_root
-            if df.at[idx, "franchise_role"] == "ENTRY":
+            if has_gaiden_kw:
+                df.at[idx, "franchise_role"] = "SPIN_OFF"
+            elif df.at[idx, "franchise_role"] == "ENTRY":
                 df.at[idx, "franchise_role"] = "SEQUEL"
 
     prefix_to_entry = {}
@@ -498,10 +519,11 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
     # Xác định chính xác phần phim tiền đề (prereq_anime_id) bắt buộc phải xem trước mỗi phần
     df["_step_priority"] = np.where(
         df["type"].astype(str).str.upper() == "MOVIE",
-        90,  # Movie thuộc franchise luôn xếp sau các phần TV cùng năm/trước đó (trừ Prequel)
+        90,
         df["title"].apply(extract_season_number)
     )
-    # Nếu là Prequel rõ ràng (VD: Jujutsu Kaisen 0) nhưng là Movie ăn theo TV -> vẫn yêu cầu xem TV gốc trước
+    # Gaiden / Spin-off xếp ngay sau bản TV gốc (Season 1), không cần đợi tới tận Season 4 mới xem được
+    df.loc[df["franchise_role"] == "SPIN_OFF", "_step_priority"] = 2
     df.loc[df["franchise_role"] == "PREQUEL", "_step_priority"] = 50
 
     chain_sorted = df.sort_values(
@@ -647,13 +669,14 @@ def fetch_jikan_catalog(pages_per_type: int = 4, force_refresh: bool = False) ->
 
     return normalize_dataframe(raw_df)
 
-def extract_movie_series_core(title: str) -> str:
+def extract_series_core(title: str) -> str:
     """
-    Tách phần tên series gốc từ các tiêu đề dạng '[Tên Anime] Movie' hoặc '[Tên Anime]: The Movie'.
+    Tách tên series gốc từ các tiêu đề chứa hậu tố Movie hoặc Gaiden / Spin-off.
     Ví dụ:
+      - 'Violet Evergarden Gaiden: Eien to Jidou Shuki Ningyou' -> 'violet evergarden'
       - 'Violet Evergarden: The Movie' -> 'violet evergarden'
       - 'Made in Abyss Movie 3: Dawn of the Deep Soul' -> 'made in abyss'
-      - 'Kimi no Na wa.' (Movie độc lập) -> 'kimi no na wa'
+      - 'Kimi no Na wa.' (Phim độc lập) -> 'kimi no na wa'
     """
-    cleaned = MOVIE_SUFFIX_PATTERN.sub("", str(title)).strip()
+    cleaned = FRANCHISE_SUFFIX_PATTERN.sub("", str(title)).strip()
     return get_franchise_root(cleaned)
