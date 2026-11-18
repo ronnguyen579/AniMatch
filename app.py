@@ -1029,23 +1029,15 @@ def main():
                             "🔥 Best Match with My Current Vibe",
                             "🎬 Movie Night (Finish in ~2 Hours)",
                             "⚡ Weekend Binge (Short Series ≤ 13 Eps)",
-                            "⭐ Highest Rated First"
+                            "⭐ Highest Rated First",
+                            "🕒 Recently Liked First"
                         ],
                         key="liked_sort_mood",
                         label_visibility="collapsed"
                     )
-                with c_pick:
-                    if st.button("🎲 Pick 1 Tonight!", use_container_width=True, type="primary"):
-                        # Chọn ngẫu nhiên có trọng số từ Top 3 bộ đứng đầu bộ lọc hiện tại
-                        top_pool = scored_liked[:3] if scored_liked else []
-                        if top_pool:
-                            chosen_aid, chosen_row, chosen_pct = top_pool[
-                                int(np.random.default_rng().integers(0, len(top_pool)))
-                            ]
-                            st.session_state.tonight_pick_id = chosen_aid
 
-                # Lọc & sắp xếp danh sách theo ngữ cảnh user chọn
-                display_list = list(reversed(scored_liked))  # Mặc định mới nhất lên đầu
+                # 3. Lọc & sắp xếp danh sách theo ngữ cảnh user chọn
+                display_list = list(reversed(scored_liked))
                 if "Best Match" in watch_mood:
                     display_list = sorted(scored_liked, key=lambda x: (x[2], float(x[1].get("score", 0))), reverse=True)
                 elif "Movie Night" in watch_mood:
@@ -1061,9 +1053,18 @@ def main():
                 elif "Highest Rated" in watch_mood:
                     display_list = sorted(scored_liked, key=lambda x: float(x[1].get("score", 0)), reverse=True)
 
-                # Hiển thị thẻ "Tonight's Spotlight Pick" nếu user vừa bấm nút Pick 1 Tonight!
+                with c_pick:
+                    if st.button("🎲 Pick 1 Tonight!", use_container_width=True, type="primary"):
+                        top_pool = display_list[:3] if display_list else []
+                        if top_pool:
+                            chosen_aid, _, _ = top_pool[
+                                int(np.random.default_rng().integers(0, len(top_pool)))
+                            ]
+                            st.session_state.tonight_pick_id = chosen_aid
+
+                # 4. Hiển thị thẻ "Tonight's Pick" nổi bật nếu user vừa bấm nút Pick 1 Tonight!
                 pick_id = st.session_state.get("tonight_pick_id")
-                if pick_id and pick_id in anime_lookup:
+                if pick_id and pick_id in anime_lookup and pick_id in liked_ids:
                     p_row = anime_lookup[pick_id]
                     p_pct = next((pct for a, _, pct in scored_liked if a == pick_id), 85)
                     st.info(
@@ -1071,6 +1072,36 @@ def main():
                         f"— **{p_pct}% Current Vibe Match** • ⭐ {p_row['score']} • 🎬 {get_main_studio(p_row['studios'])}"
                     )
 
+                st.caption("Click **👁️ Watched** once you finish a series to unlock its sequels, or **↩️ Revert** to undo.")
+
+                # 5. Hiển thị toàn bộ danh sách các bộ đã Like bên dưới
+                for l_aid, l_row, vibe_pct in display_list:
+                    c_info, c_watch, c_btn = st.columns([3.6, 1.1, 0.9])
+                    with c_info:
+                        st.markdown(
+                            f"**{l_row['title']}** `{vibe_pct}% Match` &nbsp;•&nbsp; ⭐ {l_row['score']} &nbsp;•&nbsp; "
+                            f"🎬 {get_main_studio(l_row['studios'])} &nbsp;•&nbsp; `{l_row['genres']}`"
+                        )
+                    with c_watch:
+                        if st.button("👁️ Watched", key=f"mark_watched_{l_aid}", use_container_width=True):
+                            mark_liked_as_watched(
+                                l_aid, df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                mmr_lambda, max_per_studio, franchise_thresh, min_score,
+                                quality_weight, length_filter
+                            )
+                            st.session_state.pending_ls_save = True
+                            st.rerun()
+                    with c_btn:
+                        if st.button("↩️ Revert", key=f"revert_like_{l_aid}", use_container_width=True):
+                            revert_swiped_anime(
+                                l_aid, "liked", df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                gamma, alpha, beta, mmr_lambda, max_per_studio,
+                                franchise_thresh, min_score, quality_weight, length_filter
+                            )
+                            st.session_state.pending_ls_save = True
+                            st.rerun()
+            else:
+                st.caption("No anime liked yet. Drag a card right (or press `→`) to add to your watchlist!")
         with tab_watched:
             if watched_ids:
                 st.caption("Watched titles unlock their sequels without skewing your taste unless you click **❤️ Boost**.")
