@@ -383,24 +383,37 @@ def generate_diverse_deck(
         cand_df = non_cooldown_df
 
     cand_df = cand_df.sort_values(by="sim_score", ascending=False)
-
     # =========================================================================
-    # BƯỚC 4: ENTRY-POINT GATEKEEPER (CHẶN NHẢY CÓC PHẦN SAU / MOVIE ĂN THEO)
-    # Tác dụng: Kiểm tra từng ứng viên top đầu; nếu là Sequel, Prequel, Spin-off hoặc
-    # Movie tổng kết (như Gintama: The Final) mà user chưa từng tương tác với phần gốc:
-    # - Nếu phần gốc hợp lệ -> tự động tráo (redirect) thẻ đó thành phần gốc (TV Season 1).
-    # - Nếu phần gốc không hợp lệ (VD: user đang bật lọc chỉ xem Movie) -> loại bỏ luôn.
+    # BƯỚC 4: STRICT SEQUENTIAL GATEKEEPER (KHÓA TUẦN TỰ TỪNG NẤC SEASON & MOVIE)
+    # Tác dụng: Đảm bảo Season N hoặc Movie của một franchise KHÔNG BAO GIỜ xuất hiện
+    # khi user chưa đánh dấu "Already Watched" cho phần gốc và tất cả các phần trước đó.
     # =========================================================================
-    # Chỉ mở khóa phần tiếp theo (Sequel/Prequel/Spin-off/Movie) khi phần gốc nằm trong WATCHED_IDS!
     watched_set = {int(x) for x in (watched_ids or [])}
     watched_titles = set(df.loc[df["anime_id"].isin(watched_set), "title"].astype(str))
     watched_roots = {get_franchise_root(t) for t in watched_titles}
-    if "prefix_root" in df.columns and watched_set:
-        watched_prefixes = set(
-            df.loc[df["anime_id"].isin(watched_set), "prefix_root"].dropna().astype(str)
-        )
-    else:
-        watched_prefixes = set()
+
+    # Map toàn cục từ df để truy ngược chuỗi prereq_anime_id chính xác
+    full_prereq_map = dict(zip(
+        df["anime_id"].astype(int),
+        df.get("prereq_anime_id", pd.Series(0, index=df.index)).astype(int)
+    ))
+    full_entry_map = dict(zip(
+        df["anime_id"].astype(int),
+        df.get("entry_anime_id", df["anime_id"]).astype(int)
+    ))
+
+    def _find_next_required_part(target_aid: int) -> int:
+        """Truy ngược chuỗi phụ thuộc để tìm phần phim sớm nhất user chưa xem."""
+        cur = int(target_aid)
+        visited = set()
+        while cur not in visited:
+            visited.add(cur)
+            prereq = full_prereq_map.get(cur, 0)
+            if prereq > 0 and prereq not in watched_set:
+                cur = prereq
+            else:
+                break
+        return cur
 
     cand_row_by_id = {int(r["anime_id"]): r for _, r in cand_df.iterrows()}
     top_pool = cand_df.head(min(len(cand_df), max(deck_size * 6, 45))).copy()
@@ -411,35 +424,40 @@ def generate_diverse_deck(
     for _, row in top_pool.iterrows():
         aid = int(row["anime_id"])
         role = str(row.get("franchise_role", "ENTRY")).upper()
-        entry_id = int(row.get("entry_anime_id", aid))
+        entry_id = int(full_entry_map.get(aid, aid))
+        prereq_id = int(full_prereq_map.get(aid, 0))
         root = get_franchise_root(row["title"])
-        prefix = str(row.get("prefix_root", root))
 
-        is_followup = (
-            role in ("SEQUEL", "PREQUEL", "SPIN_OFF")
-            or extract_season_number(row["title"]) > 1
-            or (entry_id != aid)
-        )
-        has_watched_origin = (
-            (entry_id in watched_set)
-            or (root in watched_roots)
-            or (len(prefix) >= 4 and prefix in watched_prefixes)
+        # Kiểm tra xem bộ này có phải là phần sau / Movie thuộc franchise chưa xem phần trước không
+        needs_prereq = (prereq_id > 0 and prereq_id not in watched_set)
+        is_unwatched_followup = (
+            (role in ("SEQUEL", "PREQUEL", "SPIN_OFF") or extract_season_number(row["title"]) > 1 or entry_id != aid)
+            and (entry_id not in watched_set)
+            and (root not in watched_roots)
         )
 
-        if is_followup and not has_watched_origin:
-            if entry_id != aid and entry_id in cand_row_by_id:
-                target_row = cand_row_by_id[entry_id]
+        if needs_prereq or is_unwatched_followup:
+            # Tìm đúng phần phim bắt buộc phải xem trước (VD: Movie -> Season 2 -> Season 1)
+            required_aid = _find_next_required_part(aid)
+            if required_aid == aid and entry_id != aid and entry_id not in watched_set:
+                required_aid = entry_id
+
+            # Nếu phần bắt buộc đó nằm trong tập ứng viên hợp lệ (đúng filter hiện tại) -> tráo sang phần đó
+            if required_aid != aid and required_aid in cand_row_by_id:
+                target_row = cand_row_by_id[required_aid]
                 tid = int(target_row["anime_id"])
                 if tid not in seen_resolved_ids:
                     seen_resolved_ids.add(tid)
                     resolved_rows.append(target_row)
+            # Nếu phần bắt buộc không có trong cand_df (VD: user đang bật bộ lọc chỉ xem Movie
+            # trong khi phần bắt buộc là TV Series) -> CHẶN HOÀN TOÀN Movie này!
             continue
 
         if aid not in seen_resolved_ids:
             seen_resolved_ids.add(aid)
             resolved_rows.append(row)
 
-    # Dự phòng: Nếu toàn bộ top_pool đều là Sequel bị chặn, lấy các bản ENTRY thuần túy trong cand_df
+    # Dự phòng: Nếu toàn bộ top_pool đều bị khóa do thiếu tiền đề, chỉ lấy các bản ENTRY thuần túy
     if not resolved_rows:
         pure_entries = cand_df[
             (cand_df["franchise_role"].astype(str).str.upper() == "ENTRY")
