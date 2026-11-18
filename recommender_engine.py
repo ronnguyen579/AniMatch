@@ -286,7 +286,8 @@ def generate_diverse_deck(
     min_score: float = 7.2,
     quality_weight: float = 0.25,
     V_i=None,
-    id_to_idx: dict = None
+    id_to_idx: dict = None,
+    watched_ids: list[int] | set[int] = None
 ) -> list[int]:
     """
     Sinh ra một bộ bài (deck) gồm `deck_size` anime tối ưu hóa giữa:
@@ -390,14 +391,16 @@ def generate_diverse_deck(
     # - Nếu phần gốc hợp lệ -> tự động tráo (redirect) thẻ đó thành phần gốc (TV Season 1).
     # - Nếu phần gốc không hợp lệ (VD: user đang bật lọc chỉ xem Movie) -> loại bỏ luôn.
     # =========================================================================
-    interacted_ids = {int(x) for x in excluded_ids}
-    seen_roots = {get_franchise_root(t) for t in swiped_titles}
-    if "prefix_root" in df.columns and swiped_titles:
-        seen_prefixes = set(
-            df.loc[df["title"].isin(set(swiped_titles)), "prefix_root"].dropna().astype(str)
+    # Chỉ mở khóa phần tiếp theo (Sequel/Prequel/Spin-off/Movie) khi phần gốc nằm trong WATCHED_IDS!
+    watched_set = {int(x) for x in (watched_ids or [])}
+    watched_titles = set(df.loc[df["anime_id"].isin(watched_set), "title"].astype(str))
+    watched_roots = {get_franchise_root(t) for t in watched_titles}
+    if "prefix_root" in df.columns and watched_set:
+        watched_prefixes = set(
+            df.loc[df["anime_id"].isin(watched_set), "prefix_root"].dropna().astype(str)
         )
     else:
-        seen_prefixes = set()
+        watched_prefixes = set()
 
     cand_row_by_id = {int(r["anime_id"]): r for _, r in cand_df.iterrows()}
     top_pool = cand_df.head(min(len(cand_df), max(deck_size * 6, 45))).copy()
@@ -417,13 +420,13 @@ def generate_diverse_deck(
             or extract_season_number(row["title"]) > 1
             or (entry_id != aid)
         )
-        has_seen_origin = (
-            (entry_id in interacted_ids)
-            or (root in seen_roots)
-            or (len(prefix) >= 4 and prefix in seen_prefixes)
+        has_watched_origin = (
+            (entry_id in watched_set)
+            or (root in watched_roots)
+            or (len(prefix) >= 4 and prefix in watched_prefixes)
         )
 
-        if is_followup and not has_seen_origin:
+        if is_followup and not has_watched_origin:
             if entry_id != aid and entry_id in cand_row_by_id:
                 target_row = cand_row_by_id[entry_id]
                 tid = int(target_row["anime_id"])
@@ -446,7 +449,6 @@ def generate_diverse_deck(
         resolved_rows = [r for _, r in fallback_source.head(deck_size * 2).iterrows()]
 
     resolved_pool = pd.DataFrame(resolved_rows)
-
     # =========================================================================
     # BƯỚC 5: KHỬ TRÙNG STUDIO & TÊN GẦN GIỐNG (DEDUPLICATION & STUDIO CAP)
     # Tác dụng: Giới hạn tối đa `max_per_studio` bộ từ cùng 1 xưởng phim trong nhóm ứng viên
