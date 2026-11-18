@@ -330,10 +330,10 @@ def normalize_title(title: str) -> str:
 
 def extract_season_number(title: str) -> int:
     t = str(title).lower()
-    if "final season" in t:
+    if re.search(r"\b(final season|the final|last|kanketsu-hen)\b", t):
         return 99
 
-    match_num = re.search(r"\b(?:season|part)\s*(\d+)\b", t)
+    match_num = re.search(r"\b(?:season|part|movie)\s*(\d+)\b", t)
     if match_num:
         return int(match_num.group(1))
 
@@ -366,17 +366,26 @@ def extract_proper_nouns(text: str) -> set:
 
 
 def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Phân loại mỗi anime thành 4 vai trò rõ ràng và ánh xạ về phần gốc (entry_anime_id):
+    - 'ENTRY': Phần mở đầu TV Series hoặc Movie độc lập hoàn toàn (an toàn cho người mới).
+    - 'SEQUEL': Phần tiếp theo hoặc Movie hậu truyện/tổng kết của một TV Series.
+    - 'PREQUEL': Tiền truyện (lấy bối cảnh trước phần gốc).
+    - 'SPIN_OFF': Ngoại truyện / vũ trụ song song / bản kể lại.
+    """
     df = df.copy()
     df["num_year"] = pd.to_numeric(df["year"], errors="coerce").fillna(9999)
     df["is_tv"] = (df["type"].astype(str).str.upper() == "TV").astype(int)
 
+    # 1. Phân loại vai trò ban đầu dựa trên Title, Type & Synopsis
     roles = []
     for _, row in df.iterrows():
         title = str(row["title"])
-        syn_head = str(row["synopsis"])[:220]
+        syn_head = str(row["synopsis"])[:260]
         s_num = extract_season_number(title)
+        fmt = str(row["type"]).upper()
 
-        if SPINOFF_PATTERNS.search(syn_head) or str(row["type"]).upper() in ("OVA", "SPECIAL", "ONA"):
+        if SPINOFF_PATTERNS.search(syn_head) or fmt in ("OVA", "SPECIAL", "ONA"):
             roles.append("SPIN_OFF")
         elif PREQUEL_PATTERNS.search(syn_head):
             roles.append("PREQUEL")
@@ -387,6 +396,7 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
 
     df["franchise_role"] = roles
 
+    # 2. Tạo khóa gốc (prefix_root) trước các dấu phân cách ':', ';', '/', '-', '–'
     df["prefix_root"] = (
         df["title"].astype(str)
         .str.split(r"[:;/\-–]").str[0]
@@ -395,16 +405,21 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
     df["proper_nouns"] = df["synopsis"].apply(extract_proper_nouns)
     df["main_studio"] = df["studios"].apply(get_main_studio)
 
+    # 3. Tìm Entry Point gốc cho mỗi franchise:
+    # Ưu tiên bản có role == 'ENTRY' và là TV (is_tv=1) phát hành sớm nhất (num_year nhỏ nhất, mal_id nhỏ nhất)
+    df["_is_entry_flag"] = (df["franchise_role"] == "ENTRY").astype(int)
     entry_candidates = df.sort_values(
-        by=["is_tv", "num_year", "anime_id"],
-        ascending=[False, True, True]
+        by=["_is_entry_flag", "is_tv", "num_year", "anime_id"],
+        ascending=[False, False, True, True]
     )
+
     prefix_to_entry = {}
     for _, row in entry_candidates.iterrows():
         p_root = row["prefix_root"]
         if len(p_root) >= 4 and p_root not in prefix_to_entry:
             prefix_to_entry[p_root] = int(row["anime_id"])
 
+    # 4. Ánh xạ từng bộ về entry_anime_id (kết hợp bắt trùng tên nhân vật + cùng Studio cho các series đổi tên)
     entry_id_map = {}
     studio_groups = df.groupby("main_studio")
 
@@ -412,19 +427,21 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
         aid = int(row["anime_id"])
         p_root = row["prefix_root"]
         role = row["franchise_role"]
+
         resolved_entry = prefix_to_entry.get(p_root, aid)
 
+        # Nếu vẫn là SEQUEL/PREQUEL nhưng tên đổi hoàn toàn (resolved_entry == aid), dò theo nhân vật + studio
         if role in ("SEQUEL", "PREQUEL") and resolved_entry == aid:
             studio = row["main_studio"]
             nouns_a = row["proper_nouns"]
             if studio and studio != "Unknown" and len(nouns_a) >= 2 and studio in studio_groups.groups:
                 peers = studio_groups.get_group(studio)
-                earlier_peers = peers[peers["num_year"] <= row["num_year"]]
+                earlier_peers = peers[
+                    (peers["num_year"] <= row["num_year"]) & (peers["anime_id"].astype(int) != aid)
+                ]
                 best_overlap = 1
                 for _, p_row in earlier_peers.iterrows():
                     p_aid = int(p_row["anime_id"])
-                    if p_aid == aid:
-                        continue
                     overlap = len(nouns_a & p_row["proper_nouns"])
                     if overlap > best_overlap:
                         best_overlap = overlap
@@ -435,8 +452,19 @@ def enrich_franchise_metadata(df: pd.DataFrame) -> pd.DataFrame:
     df["entry_anime_id"] = df["anime_id"].astype(int).map(entry_id_map)
     id_to_title = dict(zip(df["anime_id"].astype(int), df["title"].astype(str)))
     df["parent_title"] = df["entry_anime_id"].map(id_to_title).fillna("")
-    return df
 
+    # 5. Khóa an toàn cho Movie: Nếu một bộ là Movie nhưng có bản TV gốc cùng franchise
+    # (ví dụ: Gintama: The Final -> trỏ về Gintama TV 2006), bắt buộc nâng cấp nhãn thành SEQUEL
+    is_movie_sequel = (
+        (df["type"].astype(str).str.upper() == "MOVIE")
+        & (df["entry_anime_id"] != df["anime_id"].astype(int))
+        & (df["franchise_role"] == "ENTRY")
+    )
+    df.loc[is_movie_sequel, "franchise_role"] = "SEQUEL"
+
+    # Dọn dẹp cột tạm trước khi trả về
+    df = df.drop(columns=["_is_entry_flag"], errors="ignore")
+    return df
 
 def fetch_jikan_catalog(pages_per_type: int = 4, force_refresh: bool = False) -> pd.DataFrame:
     """
