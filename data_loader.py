@@ -206,25 +206,41 @@ def get_fallback_dataframe() -> pd.DataFrame:
     ]
     return pd.DataFrame(data)
 
-def load_hybrid_catalog(csv_path: str, api_pages: int = 2) -> pd.DataFrame:
-    # 1. Đọc kho nền tảng 12.000 bộ từ CSV và lọc chỉ giữ TV & Movie
-    csv_df = pd.read_csv(csv_path)
-    csv_df = csv_df[csv_df["type"].astype(str).str.upper().isin(["TV", "MOVIE"])].copy()
+def load_hybrid_catalog(csv_path: str | None, api_pages: int = 2) -> pd.DataFrame:
+    frames = []
 
-    # 2. Kéo 100 bộ mới/thịnh hành nhất từ AniList (tốn ~0.4 giây)
-    api_df = fetch_anilist_trending(pages=api_pages)
+    # 1. Lấy 100 bộ thịnh hành nhất từ API (đặt lên đầu để ưu tiên cập nhật poster HD & trailer)
+    api_df = fetch_jikan_catalog(pages_per_type=api_pages, force_refresh=False)
+    if api_df is not None and len(api_df) > 16:
+        frames.append(api_df)
 
-    # 3. Đặt api_df lên đầu để ưu tiên dữ liệu mới & poster HD, khử trùng theo mal_id
-    combined = pd.concat([api_df, csv_df], ignore_index=True)
+    # 2. Đọc kho tĩnh 12.000 bộ từ CSV và lọc chỉ giữ TV & Movie
+    if csv_path and os.path.exists(csv_path):
+        csv_df = pd.read_csv(csv_path)
+        if "type" in csv_df.columns:
+            csv_df = csv_df[csv_df["type"].astype(str).str.upper().isin(["TV", "MOVIE"])].copy()
+
+        # Đồng bộ cột mal_id và anime_id trước khi gộp để không bị dropna xóa nhầm
+        if "mal_id" not in csv_df.columns and "anime_id" in csv_df.columns:
+            csv_df["mal_id"] = csv_df["anime_id"]
+        elif "anime_id" not in csv_df.columns and "mal_id" in csv_df.columns:
+            csv_df["anime_id"] = csv_df["mal_id"]
+
+        frames.append(csv_df)
+
+    if not frames:
+        return normalize_dataframe(get_fallback_dataframe())
+
+    combined = pd.concat(frames, ignore_index=True)
     combined["mal_id"] = pd.to_numeric(combined["mal_id"], errors="coerce")
     combined = combined.dropna(subset=["mal_id"])
     combined["mal_id"] = combined["mal_id"].astype(int)
     combined["anime_id"] = combined["mal_id"]
 
-    # Giữ bản đầu tiên (từ API nếu trùng, từ CSV nếu chỉ có trong kho tĩnh)
+    # Khử trùng lớp 1: Giữ bản từ API nếu trùng mal_id, giữ bản CSV cho ~11.900 bộ còn lại
     combined = combined.drop_duplicates(subset=["mal_id"], keep="first").reset_index(drop=True)
 
-    # Khử trùng lớp 2 phòng trường hợp lệch ID nhưng trùng tên + năm phát hành
+    # Khử trùng lớp 2: Chặn trùng tên chuẩn hóa + năm phát hành
     combined["_dedup_key"] = (
         combined["title"].apply(normalize_title) + "_" + combined["year"].astype(str)
     )
