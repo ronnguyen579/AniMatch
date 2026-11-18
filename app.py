@@ -1027,8 +1027,10 @@ def main():
             if watched_ids:
                 st.caption("Watched titles unlock their sequels without skewing your taste unless you click **❤️ Boost**.")
                 boosted_ids = {
-                    int(e["anime_id"]) for e in st.session_state.swipe_history
-                    if e.get("taste_boosted") or e.get("action") == "watched" and e.get("from_liked")
+                    int(e["anime_id"])
+                    for e in st.session_state.swipe_history
+                    if isinstance(e, dict)
+                    and (e.get("taste_boosted") or (e.get("action") == "watched" and e.get("from_liked")))
                 }
                 for w_aid in reversed(watched_ids):
                     if w_aid not in anime_lookup:
