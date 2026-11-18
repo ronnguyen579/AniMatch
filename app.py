@@ -492,31 +492,39 @@ def process_swipe(
         st.session_state.passed_ids.append(current_aid)
         st.session_state.last_action_msg = f"❌ PASSED: **{title}**"
 
-    # Tự động phát hiện đi sai hướng khi Pass liên tiếp
     if action == "pass":
         st.session_state.consecutive_passes = st.session_state.get("consecutive_passes", 0) + 1
+        st.session_state.consecutive_watched = 0
     elif action == "like":
         st.session_state.consecutive_passes = 0
-    # Nếu action == "watched": giữ nguyên consecutive_passes (không cộng thêm, không reset)
+        st.session_state.consecutive_watched = 0
+    elif action == "watched":
+        # Không cộng thêm và cũng không reset consecutive_passes; chỉ đếm số lần gặp phim cũ liên tiếp
+        st.session_state.consecutive_watched = st.session_state.get("consecutive_watched", 0) + 1
 
     streak = st.session_state.get("consecutive_passes", 0)
+    watched_streak = st.session_state.get("consecutive_watched", 0)
     effective_mmr = mmr_lambda
 
-    # Chỉ kích hoạt thông báo & bẻ lái khi hành động vừa thực hiện là "pass"
+    # 1. Kích hoạt Auto-Pivot nhanh ngay tại mốc 3 lần Pass (không tính Watched xen giữa)
     if action == "pass":
-        if streak >= 5:
-            # Kéo vector người dùng thoát khỏi vùng kẹt, pha trộn lại 60% vector gốc + 40% vector hiện tại
+        if streak >= 3:
             if st.session_state.get("v_user_initial") is not None:
                 st.session_state.v_user = (
                     0.60 * st.session_state.v_user_initial + 0.40 * st.session_state.v_user
                 )
-            effective_mmr = 0.30  # Ép đa dạng hóa tối đa ở deck mới
+            effective_mmr = 0.30
             st.session_state.consecutive_passes = 0
-            st.session_state.last_action_msg = "🧭 5 passes in a row — Auto-pivoting to fresh genres & hidden gems!"
-        elif streak >= 3:
-            # Giảm mmr_lambda để bắt đầu dò sang các cụm thể loại khác
-            effective_mmr = min(mmr_lambda, 0.40)
+            st.session_state.last_action_msg = "🧭 3 passes — Auto-pivoting to fresh genres & hidden gems!"
+        elif streak == 2:
+            effective_mmr = min(mmr_lambda, 0.45)
             st.session_state.last_action_msg = "🔀 Exploring wider genres to find your vibe..."
+
+    # 2. Nếu user bấm "Already Watched" 3 lần liên tiếp -> tự đẩy đa dạng hóa để né phim cũ quen mặt
+    elif action == "watched" and watched_streak >= 3:
+        effective_mmr = min(mmr_lambda, 0.45)
+        st.session_state.consecutive_watched = 0
+        st.session_state.last_action_msg = "✨ Shifting toward fresh, less-mainstream titles you haven't seen!"
     
 
     st.session_state.deck = generate_diverse_deck(
