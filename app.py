@@ -1006,21 +1006,91 @@ def main():
 
         with tab_liked:
             if liked_ids:
-                # 1. Tính điểm "Vibe Match hiện tại" cho từng bộ trong Liked Watchlist
                 valid_liked = [aid for aid in liked_ids if aid in anime_lookup]
-                has_profile = np.linalg.norm(st.session_state.v_user) > 1e-9
+                v_u = st.session_state.v_user
+                u_norm = float(np.linalg.norm(v_u))
+                has_profile = u_norm > 1e-9
 
+                # 1. Tính Cosine Similarity thực (đã chia chuẩn L2) và quy đổi sang thang % phân hóa rõ ràng
                 scored_liked = []
                 for aid in valid_liked:
                     row = anime_lookup[aid]
                     if has_profile and aid in anime_vectors:
-                        raw_sim = float(np.dot(anime_vectors[aid], st.session_state.v_user))
-                        vibe_pct = int(np.clip(((raw_sim + 1.0) / 2.0) * 100, 0, 99))
+                        v_i = anime_vectors[aid]
+                        i_norm = float(np.linalg.norm(v_i))
+                        cos_sim = float(np.dot(v_i, v_u) / (i_norm * u_norm)) if i_norm > 1e-9 else 0.0
+                        # Trong không gian vector nội dung anime, cos_sim thường nằm trong khoảng [0.0, 0.65]
+                        vibe_pct = int(np.clip(45 + (cos_sim / 0.65) * 53, 40, 98))
                     else:
-                        vibe_pct = int(np.clip((float(row.get("score", 7.5)) / 10.0) * 100, 50, 95))
+                        vibe_pct = int(np.clip((float(row.get("score", 7.5)) / 10.0) * 90, 50, 92))
                     scored_liked.append((aid, row, vibe_pct))
 
-                # 2. Thanh "Watch-Next Decision Bar" (Chốt nhanh bộ nên xem tối nay)
+                # 2. Hàm tạo lời giải thích cá nhân hóa dựa trên lịch sử Like gần nhất & DNA thể loại
+                def _build_pick_explanation(target_aid: int, target_row: pd.Series, pct: int) -> list[str]:
+                    reasons = []
+                    t_genres = {g.strip() for g in re.split(r"[|,;]", str(target_row.get("genres", ""))) if g.strip()}
+                    t_themes = {t.strip() for t in re.split(r"[|,;]", str(target_row.get("themes", ""))) if t.strip()}
+                    t_tags = t_genres | t_themes
+                    t_studio = get_main_studio(target_row.get("studios", ""))
+
+                    # A. Tìm các bộ user vừa Like/Boost gần đây có độ tương đồng vector cao nhất với bộ được pick
+                    recent_positives = [
+                        aid for aid in reversed(liked_ids + watched_ids)
+                        if aid != target_aid and aid in anime_lookup and aid in anime_vectors
+                    ][:12]
+
+                    if recent_positives and target_aid in anime_vectors:
+                        v_t = anime_vectors[target_aid]
+                        t_n = float(np.linalg.norm(v_t))
+                        sim_peers = []
+                        for p_aid in recent_positives:
+                            v_p = anime_vectors[p_aid]
+                            p_n = float(np.linalg.norm(v_p))
+                            if t_n > 1e-9 and p_n > 1e-9:
+                                s = float(np.dot(v_t, v_p) / (t_n * p_n))
+                                sim_peers.append((s, anime_lookup[p_aid]["title"]))
+                        sim_peers.sort(reverse=True)
+                        top_peers = [name for s, name in sim_peers[:2] if s > 0.12]
+                        if top_peers:
+                            reasons.append(f"🔗 **Chung chất phim (Vibe):** Rất gần với **{', '.join(top_peers)}** mà bạn đã chọn gần đây.")
+
+                    # B. Tìm các thể loại/chủ đề giao nhau với gu tổng thể của user
+                    user_top_tags = {}
+                    for u_aid in (liked_ids + watched_ids):
+                        if u_aid in anime_lookup and u_aid != target_aid:
+                            u_r = anime_lookup[u_aid]
+                            for tag in re.split(r"[|,;]", f"{u_r.get('genres', '')}|{u_r.get('themes', '')}"):
+                                tag = tag.strip()
+                                if tag:
+                                    user_top_tags[tag] = user_top_tags.get(tag, 0) + 1
+
+                    shared_tags = sorted(
+                        [tag for tag in t_tags if tag in user_top_tags],
+                        key=lambda x: user_top_tags[x],
+                        reverse=True
+                    )[:3]
+                    if shared_tags:
+                        reasons.append(f"🧬 **Đúng DNA thể loại:** Khớp trực tiếp với gu **{', '.join(shared_tags)}** đang chiếm ưu thế trong hồ sơ của bạn.")
+
+                    # C. Lý do về nhịp độ xem & chất lượng thực tế
+                    ep_num = pd.to_numeric(target_row.get("episodes", 0), errors="coerce")
+                    fmt = str(target_row.get("type", "TV")).upper()
+                    score_val = target_row.get("score", "N/A")
+                    if fmt == "MOVIE":
+                        pacing_txt = "gọn trọn vẹn trong 1 buổi tối (Movie)"
+                    elif pd.notna(ep_num) and 1 <= ep_num <= 13:
+                        pacing_txt = f"nhịp gọn nhẹ chỉ **{int(ep_num)} tập** (dễ cày hết trong 1 cuối tuần)"
+                    elif pd.notna(ep_num) and ep_num > 13:
+                        pacing_txt = f"series dài hơi **{int(ep_num)} tập** để theo dõi sâu"
+                    else:
+                        pacing_txt = "nhịp độ vừa vặn để bắt đầu ngay"
+
+                    studio_txt = f" của **{t_studio}**" if t_studio and t_studio != "Unknown" else ""
+                    reasons.append(f"⭐ **Chất lượng & Thời lượng:** Đạt **{score_val}/10**{studio_txt}, {pacing_txt}.")
+
+                    return reasons
+
+                # 3. Thanh "Watch-Next Decision Bar"
                 c_filter, c_pick = st.columns([3.2, 1.4])
                 with c_filter:
                     watch_mood = st.selectbox(
@@ -1036,7 +1106,6 @@ def main():
                         label_visibility="collapsed"
                     )
 
-                # 3. Lọc & sắp xếp danh sách theo ngữ cảnh user chọn
                 display_list = list(reversed(scored_liked))
                 if "Best Match" in watch_mood:
                     display_list = sorted(scored_liked, key=lambda x: (x[2], float(x[1].get("score", 0))), reverse=True)
@@ -1057,24 +1126,29 @@ def main():
                     if st.button("🎲 Pick 1 Tonight!", use_container_width=True, type="primary"):
                         top_pool = display_list[:3] if display_list else []
                         if top_pool:
-                            chosen_aid, _, _ = top_pool[
-                                int(np.random.default_rng().integers(0, len(top_pool)))
+                            # Tránh bốc trùng lại bộ vừa pick ngay trước đó nếu có >= 2 lựa chọn
+                            prev_pick = st.session_state.get("tonight_pick_id")
+                            candidates = [x for x in top_pool if x[0] != prev_pick] or top_pool
+                            chosen_aid, _, _ = candidates[
+                                int(np.random.default_rng().integers(0, len(candidates)))
                             ]
                             st.session_state.tonight_pick_id = chosen_aid
 
-                # 4. Hiển thị thẻ "Tonight's Pick" nổi bật nếu user vừa bấm nút Pick 1 Tonight!
+                # 4. Hiển thị thẻ "Tonight's Pick" kèm giải thích lý do chi tiết
                 pick_id = st.session_state.get("tonight_pick_id")
                 if pick_id and pick_id in anime_lookup and pick_id in liked_ids:
                     p_row = anime_lookup[pick_id]
-                    p_pct = next((pct for a, _, pct in scored_liked if a == pick_id), 85)
+                    p_pct = next((pct for a, _, pct in scored_liked if a == pick_id), 80)
+                    why_list = _build_pick_explanation(pick_id, p_row, p_pct)
+                    why_md = "\n".join([f"- {r}" for r in why_list])
                     st.info(
-                        f"🎯 **Tonight's Pick:** **{p_row['title']}** ({p_row['type']}, {p_row.get('episodes', '?')} eps) "
-                        f"— **{p_pct}% Current Vibe Match** • ⭐ {p_row['score']} • 🎬 {get_main_studio(p_row['studios'])}"
+                        f"🎯 **Tonight's Pick: {p_row['title']}** (`{p_pct}% Vibe Match`)\n\n"
+                        f"**Tại sao hệ thống chọn bộ này cho bạn lúc này:**\n{why_md}"
                     )
 
                 st.caption("Click **👁️ Watched** once you finish a series to unlock its sequels, or **↩️ Revert** to undo.")
 
-                # 5. Hiển thị toàn bộ danh sách các bộ đã Like bên dưới
+                # 5. Hiển thị toàn bộ danh sách các bộ đã Like bên dưới với % Match phân hóa chuẩn
                 for l_aid, l_row, vibe_pct in display_list:
                     c_info, c_watch, c_btn = st.columns([3.6, 1.1, 0.9])
                     with c_info:
