@@ -209,19 +209,18 @@ def get_fallback_dataframe() -> pd.DataFrame:
 def load_hybrid_catalog(csv_path: str | None, api_pages: int = 2) -> pd.DataFrame:
     frames = []
 
-    # 1. Lấy 100 bộ thịnh hành nhất từ API (đặt lên đầu để ưu tiên cập nhật poster HD & trailer)
+    # 1. Lấy các bộ thịnh hành nhất từ API (đặt lên đầu để ưu tiên cập nhật poster HD & trailer)
     api_df = fetch_jikan_catalog(pages_per_type=api_pages, force_refresh=False)
     if api_df is not None and len(api_df) > 16:
         frames.append(api_df)
 
-    # 2. Đọc kho tĩnh 12.000 bộ từ CSV và lọc chỉ giữ TV & Movie
+    # 2. Đọc toàn bộ kho tĩnh từ CSV và lọc chỉ giữ TV & Movie
     if csv_path and os.path.exists(csv_path):
         csv_df = pd.read_csv(csv_path)
         if "type" in csv_df.columns:
             t_col = csv_df["type"].fillna("TV").astype(str).str.upper().str.strip()
             csv_df = csv_df[t_col.str.contains(r"\b(?:TV|MOVIE)\b", regex=True)].copy()
 
-        # Đồng bộ cột mal_id và anime_id trước khi gộp để không bị dropna xóa nhầm
         if "mal_id" not in csv_df.columns and "anime_id" in csv_df.columns:
             csv_df["mal_id"] = csv_df["anime_id"]
         elif "anime_id" not in csv_df.columns and "mal_id" in csv_df.columns:
@@ -238,16 +237,10 @@ def load_hybrid_catalog(csv_path: str | None, api_pages: int = 2) -> pd.DataFram
     combined["mal_id"] = combined["mal_id"].astype(int)
     combined["anime_id"] = combined["mal_id"]
 
-    # Khử trùng lớp 1: Giữ bản từ API nếu trùng mal_id, giữ bản CSV cho ~11.900 bộ còn lại
+    # Chỉ khử trùng duy nhất theo mal_id (giữ bản từ API nếu trùng, giữ đủ 100% các phần Season/Part khác nhau)
     combined = combined.drop_duplicates(subset=["mal_id"], keep="first").reset_index(drop=True)
 
-    # Khử trùng lớp 2: Chặn trùng tên chuẩn hóa + năm phát hành
-    combined["_dedup_key"] = (
-        combined["title"].apply(normalize_title) + "_" + combined["year"].astype(str)
-    )
-    combined = combined.drop_duplicates(subset=["_dedup_key"], keep="first").drop(columns=["_dedup_key"])
-
-    return normalize_dataframe(combined.reset_index(drop=True))
+    return normalize_dataframe(combined)
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
