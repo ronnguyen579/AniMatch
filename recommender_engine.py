@@ -288,11 +288,23 @@ def generate_diverse_deck(
     V_i=None,
     id_to_idx: dict = None
 ) -> list[int]:
+    """
+    Sinh ra một bộ bài (deck) gồm `deck_size` anime tối ưu hóa giữa:
+    1. Độ hợp gu cá nhân (Cosine Similarity với vector người dùng v_user).
+    2. Chất lượng phim (Điểm đánh giá MAL/AniList).
+    3. Entry-Point Gatekeeper: Chặn tuyệt đối Movie hậu truyện / Season sau xuất hiện trước phần gốc.
+    4. Franchise Cooldown & Pacing: Ngăn việc bội thực liên tiếp cùng 1 series sau khi user bấm Like.
+    5. MMR (Maximal Marginal Relevance) + Studio Cap: Ép đa dạng thể loại và xưởng phim trong cùng 1 deck.
+    """
+
+    # =========================================================================
+    # BƯỚC 1: LỌC LOẠI TRỪ & LỌC CHẤT LƯỢNG (QUALITY FILTERING)
+    # Tác dụng: Loại bỏ các phim user đã quẹt/xem/ẩn và lọc ra các phim đạt ngưỡng điểm tối thiểu.
+    # =========================================================================
     mask = ~df["anime_id"].isin(excluded_ids).values
     if not np.any(mask):
         return []
 
-    # Lấy thêm các cột franchise_role & entry_anime_id đã được enrich từ data_loader.py
     base_cols = ["anime_id", "title", "studios", "score", "year", "type"]
     for extra_col in ["franchise_role", "entry_anime_id", "prefix_root"]:
         if extra_col in df.columns:
@@ -308,6 +320,7 @@ def generate_diverse_deck(
     cand_df["num_score"] = num_scores
     cand_df["num_year"] = pd.to_numeric(cand_df["year"], errors="coerce").fillna(9999).values
 
+    # Ưu tiên lấy các phim có điểm >= min_score; nếu thiếu bài thì nới lỏng xuống (min_score - 1.0)
     hq_mask = num_scores >= min_score
     if np.sum(hq_mask) >= deck_size:
         cand_df = cand_df[hq_mask]
@@ -318,6 +331,12 @@ def generate_diverse_deck(
 
     cand_ids = cand_df["anime_id"].tolist()
 
+    # =========================================================================
+    # BƯỚC 2: TÍNH ĐIỂM PHÙ HỢP CÁ NHÂN (RELEVANCE & COLD-START SCORING)
+    # Tác dụng: Kết hợp độ tương đồng vector (v_user) với điểm chất lượng phim.
+    # Nếu user mới tinh (v_user == 0), trộn thêm nhiễu ngẫu nhiên có trọng số để mỗi lần mở app
+    # nhận được bộ thẻ mở đầu khác nhau.
+    # =========================================================================
     if V_i is not None and id_to_idx is not None:
         cand_matrix = V_i[[id_to_idx[aid] for aid in cand_ids]]
     else:
@@ -325,33 +344,64 @@ def generate_diverse_deck(
 
     norm_quality = np.clip((cand_df["num_score"].values - 5.0) / 4.5, 0.0, 1.0)
 
-    # 1. TÍNH ĐIỂM TƯƠNG ĐỒNG HOẶC COLD-START ĐA DẠNG
     if np.linalg.norm(v_user) > 1e-9:
         raw_cos = cosine_similarity(cand_matrix, v_user.reshape(1, -1)).flatten()
         norm_cos = (raw_cos + 1.0) / 2.0
         combined_rel = ((1.0 - quality_weight) * norm_cos) + (quality_weight * norm_quality)
         cand_df["sim_score"] = combined_rel
-        cand_df = cand_df.sort_values(by="sim_score", ascending=False)
     else:
         rng = np.random.default_rng()
         jitter = rng.uniform(0.0, 0.35, size=len(cand_df))
         cand_df["sim_score"] = (0.65 * norm_quality) + jitter
-        cand_df = cand_df.sort_values(by="sim_score", ascending=False)
 
-    # 2. ENTRY-POINT GATEKEEPER:
-    # Chặn tuyệt đối Movie hậu truyện / Season sau / Spin-off xuất hiện trước khi user xem phần gốc!
+    # =========================================================================
+    # BƯỚC 3: KIỂM SOÁT NHỊP ĐỘ FRANCHISE (FRANCHISE COOLDOWN & PACING)
+    # Tác dụng: Ngăn hiện tượng "hiệu ứng đường hầm" — khi user vừa Like phần 1, hệ thống
+    # tạm khóa các phần tiếp theo trong 4 lượt quẹt và giảm nhẹ trọng số Sequel (0.88x)
+    # để user có không gian đổi sang series/thể loại mới trước khi cày tiếp phần sau.
+    # =========================================================================
+    recent_titles = swiped_titles[-4:] if swiped_titles else []
+    recent_roots = {get_franchise_root(t) for t in recent_titles}
+    if "prefix_root" in df.columns and recent_titles:
+        recent_prefixes = set(
+            df.loc[df["title"].isin(set(recent_titles)), "prefix_root"].dropna().astype(str)
+        )
+    else:
+        recent_prefixes = set()
+
+    is_seq_mask = cand_df["franchise_role"].astype(str).str.upper().isin(["SEQUEL", "PREQUEL", "SPIN_OFF"])
+    cand_df.loc[is_seq_mask, "sim_score"] = cand_df.loc[is_seq_mask, "sim_score"] * 0.88
+
+    def _is_in_franchise_cooldown(row) -> bool:
+        r_root = get_franchise_root(row["title"])
+        r_pref = str(row.get("prefix_root", r_root))
+        return (r_root in recent_roots) or (len(r_pref) >= 4 and r_pref in recent_prefixes)
+
+    non_cooldown_df = cand_df[~cand_df.apply(_is_in_franchise_cooldown, axis=1)]
+    if len(non_cooldown_df) >= deck_size * 2:
+        cand_df = non_cooldown_df
+
+    cand_df = cand_df.sort_values(by="sim_score", ascending=False)
+
+    # =========================================================================
+    # BƯỚC 4: ENTRY-POINT GATEKEEPER (CHẶN NHẢY CÓC PHẦN SAU / MOVIE ĂN THEO)
+    # Tác dụng: Kiểm tra từng ứng viên top đầu; nếu là Sequel, Prequel, Spin-off hoặc
+    # Movie tổng kết (như Gintama: The Final) mà user chưa từng tương tác với phần gốc:
+    # - Nếu phần gốc hợp lệ -> tự động tráo (redirect) thẻ đó thành phần gốc (TV Season 1).
+    # - Nếu phần gốc không hợp lệ (VD: user đang bật lọc chỉ xem Movie) -> loại bỏ luôn.
+    # =========================================================================
     interacted_ids = {int(x) for x in excluded_ids}
     seen_roots = {get_franchise_root(t) for t in swiped_titles}
-    if "prefix_root" in df.columns:
-        swiped_set = set(swiped_titles)
-        seen_prefixes = set(df.loc[df["title"].isin(swiped_set), "prefix_root"].dropna().astype(str))
+    if "prefix_root" in df.columns and swiped_titles:
+        seen_prefixes = set(
+            df.loc[df["title"].isin(set(swiped_titles)), "prefix_root"].dropna().astype(str)
+        )
     else:
         seen_prefixes = set()
 
-    # Bảng tra cứu nhanh các ứng viên đang hợp lệ trong cand_df (đã qua bộ lọc length_filter & min_score)
     cand_row_by_id = {int(r["anime_id"]): r for _, r in cand_df.iterrows()}
-
     top_pool = cand_df.head(min(len(cand_df), max(deck_size * 6, 45))).copy()
+
     resolved_rows = []
     seen_resolved_ids = set()
 
@@ -374,22 +424,19 @@ def generate_diverse_deck(
         )
 
         if is_followup and not has_seen_origin:
-            # Nếu phần gốc (TV Season 1) cũng đang nằm trong tập ứng viên hợp lệ -> tráo sang phần gốc
             if entry_id != aid and entry_id in cand_row_by_id:
                 target_row = cand_row_by_id[entry_id]
                 tid = int(target_row["anime_id"])
                 if tid not in seen_resolved_ids:
                     seen_resolved_ids.add(tid)
                     resolved_rows.append(target_row)
-            # Nếu phần gốc không hợp lệ (ví dụ user đang lọc chỉ xem Movie, hoặc đã quẹt Pass phần gốc)
-            # -> BỎ QUA luôn phần Movie/Sequel ăn theo này!
             continue
 
         if aid not in seen_resolved_ids:
             seen_resolved_ids.add(aid)
             resolved_rows.append(row)
 
-    # Phòng trường hợp top_pool bị lọc hết sạch do toàn sequel -> lấy dự phòng từ các bản ENTRY thuần trong cand_df
+    # Dự phòng: Nếu toàn bộ top_pool đều là Sequel bị chặn, lấy các bản ENTRY thuần túy trong cand_df
     if not resolved_rows:
         pure_entries = cand_df[
             (cand_df["franchise_role"].astype(str).str.upper() == "ENTRY")
@@ -400,6 +447,11 @@ def generate_diverse_deck(
 
     resolved_pool = pd.DataFrame(resolved_rows)
 
+    # =========================================================================
+    # BƯỚC 5: KHỬ TRÙNG STUDIO & TÊN GẦN GIỐNG (DEDUPLICATION & STUDIO CAP)
+    # Tác dụng: Giới hạn tối đa `max_per_studio` bộ từ cùng 1 xưởng phim trong nhóm ứng viên
+    # và loại bỏ các bản trùng tên mờ (fuzzy match >= franchise_threshold).
+    # =========================================================================
     gated_df = deduplicate(
         resolved_pool,
         max_per_studio=max_per_studio,
@@ -414,20 +466,35 @@ def generate_diverse_deck(
     if n_gated <= 1:
         return gated_ids
 
+    # =========================================================================
+    # BƯỚC 6: TÁI XẾP HẠNG ĐA DẠNG HÓA MMR (MAXIMAL MARGINAL RELEVANCE)
+    # Tác dụng: Chọn lần lượt từng thẻ vào deck sao cho vừa bám sát gu user (mmr_lambda),
+    # vừa khác biệt nội dung với các thẻ đã chọn trước đó (1 - mmr_lambda), đồng thời khóa
+    # cứng mỗi franchise chỉ xuất hiện tối đa 1 lần duy nhất trong deck 8 thẻ.
+    # =========================================================================
     if V_i is not None and id_to_idx is not None:
         pairwise_sim = cosine_similarity(V_i[[id_to_idx[aid] for aid in gated_ids]])
     else:
         pairwise_sim = cosine_similarity(np.vstack([anime_vectors[aid] for aid in gated_ids]))
 
     user_sims = gated_df["sim_score"].values
+    gated_roots = [get_franchise_root(t) for t in gated_df["title"].tolist()]
+
     selected_pos = [0]
+    selected_roots = {gated_roots[0]}
     remaining_pos = list(range(1, n_gated))
 
     while remaining_pos and len(selected_pos) < deck_size:
-        max_sim_to_selected = np.max(pairwise_sim[np.ix_(remaining_pos, selected_pos)], axis=1)
-        mmr_scores = (mmr_lambda * user_sims[remaining_pos]) - ((1.0 - mmr_lambda) * max_sim_to_selected)
+        fresh_franchise_pos = [p for p in remaining_pos if gated_roots[p] not in selected_roots]
+        pool_to_pick = fresh_franchise_pos if fresh_franchise_pos else remaining_pos
+
+        max_sim_to_selected = np.max(pairwise_sim[np.ix_(pool_to_pick, selected_pos)], axis=1)
+        mmr_scores = (mmr_lambda * user_sims[pool_to_pick]) - ((1.0 - mmr_lambda) * max_sim_to_selected)
         best_local_idx = int(np.argmax(mmr_scores))
-        chosen_pos = remaining_pos.pop(best_local_idx)
+        chosen_pos = pool_to_pick[best_local_idx]
+
+        remaining_pos.remove(chosen_pos)
         selected_pos.append(chosen_pos)
+        selected_roots.add(gated_roots[chosen_pos])
 
     return [gated_ids[p] for p in selected_pos]
