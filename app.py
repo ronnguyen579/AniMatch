@@ -466,8 +466,14 @@ def process_swipe(
         st.session_state.liked_ids.append(current_aid)
         st.session_state.last_action_msg = f"💚 LIKED: **{anime_row['title']}**"
     elif action == "watched":
-        st.session_state.watched_ids.append(current_aid)
-        st.session_state.last_action_msg = f"👁️ ALREADY WATCHED (+Taste Boost): **{anime_row['title']}**"
+        if aid not in st.session_state.watched_ids:
+            st.session_state.watched_ids.append(aid)
+        st.session_state.excluded_ids.add(aid)
+        # Trọng số = 0 (Neutral): Chỉ ẩn thẻ và mở khóa Sequel, KHÔNG làm lệch vector gu v_user
+        st.session_state.swipe_history.append({
+            "anime_id": aid, "title": title, "action": "watched", "taste_boosted": False
+        })
+        st.session_state.last_action_msg = f"👁️ Marked as Watched (Neutral taste — sequels unlocked): **{title}**"
     else:
         st.session_state.passed_ids.append(current_aid)
         st.session_state.last_action_msg = f"❌ PASSED: **{anime_row['title']}**"
@@ -634,6 +640,65 @@ def mark_liked_as_watched(
         watched_ids=st.session_state.watched_ids
     )
     st.session_state.last_action_msg = f"👁️ Marked **{title}** as Watched — sequels unlocked!"
+
+def apply_watched_feedback(
+    aid: int,
+    sentiment: str,  # "boost" hoặc "dislike"
+    df: pd.DataFrame,
+    V_i,
+    id_to_idx: dict,
+    anime_lookup: dict,
+    anime_vectors: dict,
+    gamma: float,
+    alpha: float,
+    beta: float,
+    mmr_lambda: float,
+    max_per_studio: int,
+    franchise_thresh: int,
+    min_score: float,
+    quality_weight: float,
+    length_filter: str
+):
+    """
+    Điều chỉnh vector sở thích v_user dựa trên cảm nhận của user với một bộ phim đã xem:
+    - 'boost': Cộng +alpha vào v_user để tìm thêm phim có vibe tương tự.
+    - 'dislike': Trừ -beta khỏi v_user và gỡ khỏi danh sách mở khóa Sequel.
+    """
+    aid = int(aid)
+    if aid not in anime_vectors:
+        return
+    v_item = anime_vectors[aid]
+    title = anime_lookup[aid]["title"] if aid in anime_lookup else f"ID {aid}"
+
+    if sentiment == "boost":
+        st.session_state.v_user = update_user_vector(
+            st.session_state.v_user, v_item, action="like", gamma=gamma, alpha=alpha, beta=beta
+        )
+        for entry in reversed(st.session_state.swipe_history):
+            if int(entry.get("anime_id", -1)) == aid:
+                entry["taste_boosted"] = True
+                break
+        st.session_state.last_action_msg = f"❤️ Boosted taste profile with **{title}**!"
+
+    elif sentiment == "dislike":
+        st.session_state.v_user = update_user_vector(
+            st.session_state.v_user, v_item, action="pass", gamma=gamma, alpha=alpha, beta=beta
+        )
+        # Gỡ khỏi watched_ids để không gợi ý Sequel của bộ user không thích, nhưng vẫn giữ trong excluded_ids
+        if aid in st.session_state.watched_ids:
+            st.session_state.watched_ids.remove(aid)
+        if aid not in st.session_state.passed_ids:
+            st.session_state.passed_ids.append(aid)
+        st.session_state.excluded_ids.add(aid)
+        st.session_state.last_action_msg = f"👎 Downvoted **{title}** — won't recommend similar titles or sequels."
+
+    st.session_state.deck = generate_diverse_deck(
+        df, anime_vectors, st.session_state.v_user,
+        _get_all_excluded_ids(df, length_filter), st.session_state.swiped_titles, 8,
+        mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
+        V_i=V_i, id_to_idx=id_to_idx,
+        watched_ids=st.session_state.watched_ids
+    )
 
 
 def main():
@@ -960,19 +1025,42 @@ def main():
 
         with tab_watched:
             if watched_ids:
-                st.caption("Anime you swiped down (`↓`) as already watched — these boost your taste profile without cluttering your watchlist.")
+                st.caption("Watched titles unlock their sequels without skewing your taste unless you click **❤️ Boost**.")
+                boosted_ids = {
+                    int(e["anime_id"]) for e in st.session_state.swipe_history
+                    if e.get("taste_boosted") or e.get("action") == "watched" and e.get("from_liked")
+                }
                 for w_aid in reversed(watched_ids):
                     if w_aid not in anime_lookup:
                         continue
                     w_row = anime_lookup[w_aid]
-                    c_info, c_btn = st.columns([4.2, 1])
+                    c_info, c_boost, c_meh, c_rev = st.columns([3.3, 0.95, 0.85, 0.9])
                     with c_info:
+                        badge = " `❤️ Boosted`" if w_aid in boosted_ids else ""
                         st.markdown(
-                            f"**{w_row['title']}** &nbsp;•&nbsp; ⭐ {w_row['score']} &nbsp;•&nbsp; "
-                            f"🎬 {get_main_studio(w_row['studios'])} &nbsp;•&nbsp; `{w_row['genres']}`"
+                            f"**{w_row['title']}**{badge} &nbsp;•&nbsp; ⭐ {w_row['score']} &nbsp;•&nbsp; "
+                            f"🎬 {get_main_studio(w_row['studios'])}"
                         )
-                    with c_btn:
-                        if st.button("↩️ Revert", key=f"revert_watched_{w_aid}", use_container_width=True):
+                    with c_boost:
+                        if st.button("❤️ Boost", key=f"boost_watch_{w_aid}", use_container_width=True):
+                            apply_watched_feedback(
+                                w_aid, "boost", df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                gamma, alpha, beta, mmr_lambda, max_per_studio,
+                                franchise_thresh, min_score, quality_weight, length_filter
+                            )
+                            st.session_state.pending_ls_save = True
+                            st.rerun()
+                    with c_meh:
+                        if st.button("👎 Meh", key=f"meh_watch_{w_aid}", use_container_width=True):
+                            apply_watched_feedback(
+                                w_aid, "dislike", df, V_i, id_to_idx, anime_lookup, anime_vectors,
+                                gamma, alpha, beta, mmr_lambda, max_per_studio,
+                                franchise_thresh, min_score, quality_weight, length_filter
+                            )
+                            st.session_state.pending_ls_save = True
+                            st.rerun()
+                    with c_rev:
+                        if st.button("↩️ Revert", key=f"revert_watch_{w_aid}", use_container_width=True):
                             revert_swiped_anime(
                                 w_aid, "watched", df, V_i, id_to_idx, anime_lookup, anime_vectors,
                                 gamma, alpha, beta, mmr_lambda, max_per_studio,
@@ -981,7 +1069,7 @@ def main():
                             st.session_state.pending_ls_save = True
                             st.rerun()
             else:
-                st.caption("No watched anime logged yet. Swipe down (or press `↓`) when you see an anime you've already finished!")
+                st.caption("No watched anime marked yet. Swipe down (or press `↓`) to skip shows you've already seen.")
 
         with tab_passed:
             if passed_ids:
