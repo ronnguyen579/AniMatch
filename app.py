@@ -899,7 +899,7 @@ def main():
             "⚖️ Side-by-Side Comparison"
         ])
 
-       with tab_liked:
+        with tab_liked:
             if liked_ids:
                 st.caption("Your saved watchlist. Click **👁️ Watched** once you finish a series to unlock its sequels, or **↩️ Revert** to undo.")
                 for l_aid in reversed(liked_ids):
