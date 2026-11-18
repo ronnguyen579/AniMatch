@@ -463,6 +463,7 @@ def process_swipe(
     st.session_state.swipe_count += 1
 
     aid = int(current_aid)  # Khớp với biến ID của lá bài trên cùng trong process_swipe
+    title = anime_lookup[aid]["title"] if aid in anime_lookup else f"ID {aid}"
 
     if action == "watched":
         if aid not in st.session_state.watched_ids:
