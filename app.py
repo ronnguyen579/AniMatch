@@ -941,14 +941,14 @@ def main():
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 local_csv_files = sorted([
-        p for p in glob.glob(os.path.join(current_dir, "*.csv"))
-        if "jikan_tv_movie_cache" not in os.path.basename(p)
-    ])
-    main_csv_path = local_csv_files[0] if local_csv_files else None
+    p for p in glob.glob(os.path.join(current_dir, "*.csv"))
+    if "jikan_tv_movie_cache" not in os.path.basename(p)
+])
+main_csv_path = local_csv_files[0] if local_csv_files else None
 
-    df, all_genres, anime_lookup = load_and_prepare_catalog(csv_path=main_csv_path, api_pages=2)
-    sig = f"hybrid_{os.path.basename(main_csv_path) if main_csv_path else 'api'}_{len(df)}"
-    data_source_label = f"Hybrid (Live API + {os.path.basename(main_csv_path)})" if main_csv_path else "Live API"
+df, all_genres, anime_lookup = load_and_prepare_catalog(csv_path=main_csv_path, api_pages=2)
+sig = f"hybrid_{os.path.basename(main_csv_path) if main_csv_path else 'api'}_{len(df)}"
+data_source_label = f"Hybrid (Live API + {os.path.basename(main_csv_path)})" if main_csv_path else "Live API"
 
 if __name__ == "__main__":
     main()
