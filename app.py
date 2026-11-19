@@ -105,12 +105,19 @@ def open_onboarding_modal(
             v_user_0, excluded_ids = seeder.seed_cold_start("eyecandy_first", [])
             st.session_state.persona_mode = "Eyecandy First"
             st.session_state.seed_params = {}
+            st.session_state.v_user_initial = v_user_0.copy()
             st.session_state.v_user = v_user_0
+            st.session_state.swipe_history = []
             st.session_state.excluded_ids = excluded_ids
+            st.session_state.cooldown_ids = {}
             st.session_state.swiped_titles = []
             st.session_state.liked_ids = []
             st.session_state.passed_ids = []
+            st.session_state.watched_ids = []
             st.session_state.swipe_count = 0
+            st.session_state.consecutive_passes = 0
+            st.session_state.consecutive_watched = 0
+            st.session_state.tonight_pick_id = None
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, [], 8,
                 mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
@@ -131,13 +138,18 @@ def open_onboarding_modal(
             st.session_state.persona_mode = "Content First"
             st.session_state.seed_params = {"selected_genres": selected_genres}
             st.session_state.v_user_initial = v_user_0.copy()
+            st.session_state.v_user = v_user_0
             st.session_state.swipe_history = []
-            st.session_state.watched_ids = []
             st.session_state.excluded_ids = excluded_ids
+            st.session_state.cooldown_ids = {}
             st.session_state.swiped_titles = []
             st.session_state.liked_ids = []
             st.session_state.passed_ids = []
+            st.session_state.watched_ids = []
             st.session_state.swipe_count = 0
+            st.session_state.consecutive_passes = 0
+            st.session_state.consecutive_watched = 0
+            st.session_state.tonight_pick_id = None
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, [], 8,
                 mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
@@ -175,12 +187,19 @@ def open_onboarding_modal(
                 "lambda_1": lambda_1,
                 "lambda_2": lambda_2,
             }
+            st.session_state.v_user_initial = v_user_0.copy()
             st.session_state.v_user = v_user_0
+            st.session_state.swipe_history = []
             st.session_state.excluded_ids = excluded_ids
-            st.session_state.swiped_titles = [str(df[df["anime_id"] == aid].iloc[0]["title"]) for aid in past_ids]
+            st.session_state.cooldown_ids = {}
+            st.session_state.swiped_titles = []
             st.session_state.liked_ids = []
             st.session_state.passed_ids = []
+            st.session_state.watched_ids = []
             st.session_state.swipe_count = 0
+            st.session_state.consecutive_passes = 0
+            st.session_state.consecutive_watched = 0
+            st.session_state.tonight_pick_id = None
             st.session_state.deck = generate_diverse_deck(
                 df, anime_vectors, v_user_0, excluded_ids, st.session_state.swiped_titles, 8,
                 mmr_lambda, max_per_studio, franchise_thresh, min_score, quality_weight,
@@ -735,17 +754,37 @@ def main():
     if st.session_state.get("pending_ls_clear", False):
         clear_browser_profile()
         st.session_state.pending_ls_clear = False
+        st.session_state.pending_ls_save = False  # Chặn ghi đè lại dữ liệu cũ nếu có
+        st.session_state.ls_checked = True        # Chặn đọc lại dữ liệu cũ từ trình duyệt
 
-    if st.session_state.get("pending_ls_save", False):
+    elif st.session_state.get("pending_ls_save", False):
         save_profile_to_browser()
         st.session_state.pending_ls_save = False
-
     top_c1, top_c2 = st.columns([3.5, 1.5])
     with top_c1:
         st.markdown("## 🔥 AniMatch")
     with top_c2:
         if st.button("🧭 Change Persona / Reset", use_container_width=True):
+            clear_browser_profile()
             st.session_state.pending_ls_clear = True
+            st.session_state.ls_checked = True  # Chặn load_profile_from_browser nạp lại dữ liệu cũ
+            st.session_state.onboarded = False
+            st.session_state.persona_mode = "Not Selected"
+            st.session_state.v_user_initial = None
+            st.session_state.v_user = None
+            st.session_state.swipe_history = []
+            st.session_state.excluded_ids = set()
+            st.session_state.cooldown_ids = {}
+            st.session_state.swiped_titles = []
+            st.session_state.deck = []
+            st.session_state.liked_ids = []
+            st.session_state.passed_ids = []
+            st.session_state.watched_ids = []
+            st.session_state.swipe_count = 0
+            st.session_state.consecutive_passes = 0
+            st.session_state.consecutive_watched = 0
+            st.session_state.tonight_pick_id = None
+            st.session_state.last_action_msg = ""
             st.session_state.show_onboarding_modal = True
             st.rerun()
 
