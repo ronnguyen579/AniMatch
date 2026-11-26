@@ -1,7 +1,3 @@
-# AniMatch 2.2 — Franchise Graph, Trailer, Taste Expansion
-
-**Mới:** xem [`UPGRADE_2_2_VI.md`](UPGRADE_2_2_VI.md) để áp dụng bản nâng cấp AniList PREQUEL, YouTube search/embed và Genres/Themes/Demographics.
-
 # AniMatch 2.0 — Full-stack TypeScript rebuild
 
 **React + Vite + TypeScript · Fastify (Node.js) · PostgreSQL · TypeScript recommendation engine**
@@ -111,6 +107,10 @@ Phát triển cho MVP trong môi trường tin cậy. Các endpoint ngoại tr�
 ## AniMatch 2.1 — UX update
 
 Mode-first onboarding, swipe gestures, live polygon vibe radar, searchable corpus-backed visual vocabulary, YouTube trailer embedding and on-demand larger posters. See [UPDATE_2_1_VI.md](UPDATE_2_1_VI.md).
+
+# AniMatch 2.2 — Franchise Graph, Trailer, Taste Expansion
+
+**Mới:** xem [`UPGRADE_2_2_VI.md`](UPGRADE_2_2_VI.md) để áp dụng bản nâng cấp AniList PREQUEL, YouTube search/embed và Genres/Themes/Demographics.
 
 ## AniMatch 2.3 update
 
