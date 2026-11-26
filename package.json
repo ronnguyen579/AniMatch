@@ -1,0 +1,25 @@
+{
+  "name": "animatch-2",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c cyan,green \"npm run dev -w @animatch/api\" \"npm run dev -w @animatch/web\"",
+    "build": "npm run build -w @animatch/engine && npm run build -w @animatch/api && npm run build -w @animatch/web",
+    "typecheck": "tsc -p packages/engine/tsconfig.json --noEmit && tsc -p apps/api/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit",
+    "db:init": "tsx scripts/init-db.ts",
+    "db:import": "tsx scripts/import-anime.ts",
+    "benchmark": "tsx benchmarks/run.ts",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3",
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.11.13"
+  }
+}
